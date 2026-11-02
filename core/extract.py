@@ -30,8 +30,10 @@ missing_questions 배열에 카드 title과 함께 적어줘.
 
 def extract_cards(documents: dict) -> tuple[list[ExperienceCard], list[dict]]:
     joined = "\n\n".join(f"## {name}\n{text}" for name, text in documents.items())
+    # 추출은 창작이 아니라 옮겨 적기라서 온도를 낮춘다.
     data = ask_json(
-        "writer", SYSTEM, PROMPT.format(kinds=", ".join(CARD_KINDS), documents=joined[:60000])
+        "writer", SYSTEM, PROMPT.format(kinds=", ".join(CARD_KINDS), documents=joined[:60000]),
+        temperature=0.2,
     )
     fields = ExperienceCard.__dataclass_fields__
     cards = []

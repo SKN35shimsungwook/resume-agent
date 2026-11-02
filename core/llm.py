@@ -41,21 +41,28 @@ def _api_key(config: dict, provider: str) -> str:
     return key
 
 
-def ask_json(role: str, system: str, prompt: str, config: dict | None = None) -> dict:
-    """role은 'writer' 또는 'judge'. 응답은 JSON 객체로 받는다."""
+def ask_json(
+    role: str, system: str, prompt: str, config: dict | None = None, temperature: float | None = None
+) -> dict:
+    """role은 'writer' 또는 'judge'. 응답은 JSON 객체로 받는다.
+
+    temperature를 안 주면 작성은 0.6(문장 다양성), 평가는 0.2(채점 일관성).
+    """
     config = config or load_config()
     spec = config[role]
     key = _api_key(config, spec["provider"])
+    if temperature is None:
+        temperature = 0.6 if role == "writer" else 0.2
     if spec["provider"] == "gemini":
-        text = _ask_gemini(key, spec["model"], system, prompt)
+        text = _ask_gemini(key, spec["model"], system, prompt, temperature)
     elif spec["provider"] == "openai":
-        text = _ask_openai(key, spec["model"], system, prompt)
+        text = _ask_openai(key, spec["model"], system, prompt, temperature)
     else:
         raise ValueError(f"알 수 없는 제공자: {spec['provider']}")
     return _extract_json(text)
 
 
-def _ask_gemini(key: str, model: str, system: str, prompt: str) -> str:
+def _ask_gemini(key: str, model: str, system: str, prompt: str, temperature: float) -> str:
     from google import genai
     from google.genai import types
 
@@ -66,7 +73,7 @@ def _ask_gemini(key: str, model: str, system: str, prompt: str) -> str:
         config=types.GenerateContentConfig(
             system_instruction=system,
             response_mime_type="application/json",
-            temperature=0.6,
+            temperature=temperature,
         ),
     )
     if response.candidates and str(response.candidates[0].finish_reason).endswith("MAX_TOKENS"):
@@ -74,7 +81,7 @@ def _ask_gemini(key: str, model: str, system: str, prompt: str) -> str:
     return response.text
 
 
-def _ask_openai(key: str, model: str, system: str, prompt: str) -> str:
+def _ask_openai(key: str, model: str, system: str, prompt: str, temperature: float) -> str:
     from openai import OpenAI
 
     client = OpenAI(api_key=key)
@@ -82,7 +89,7 @@ def _ask_openai(key: str, model: str, system: str, prompt: str) -> str:
         model=model,
         messages=[{"role": "system", "content": system}, {"role": "user", "content": prompt}],
         response_format={"type": "json_object"},
-        temperature=0.3,
+        temperature=temperature,
     )
     return response.choices[0].message.content
 
