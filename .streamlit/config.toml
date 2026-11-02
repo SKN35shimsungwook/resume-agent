@@ -1,0 +1,16 @@
+[theme]
+base = "light"
+primaryColor = "#2F6BFF"
+backgroundColor = "#F5F7FB"
+secondaryBackgroundColor = "#EEF2F8"
+textColor = "#1B2333"
+borderColor = "#DDE3EE"
+greenColor = "#1FA34A"
+greenBackgroundColor = "#E6F6EC"
+blueBackgroundColor = "#EAF0FF"
+font = "'Noto Sans KR':https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;700;800&display=swap"
+baseRadius = "large"
+showSidebarBorder = false
+
+[client]
+toolbarMode = "minimal"
