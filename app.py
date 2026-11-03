@@ -7,6 +7,7 @@ st.set_page_config(page_title="맞춤 자소서 에이전트", page_icon="📝",
 pages = st.navigation(
     [
         st.Page("views/home.py", title="처음", default=True),
+        st.Page("views/guide.py", title="하나씩 따라하기"),
         st.Page("views/profile.py", title="내 경험 정리"),
         st.Page("views/settings.py", title="설정"),
         st.Page("views/write.py", title="회사 맞춤 작성"),
@@ -15,7 +16,5 @@ pages = st.navigation(
     position="hidden",
 )
 ui.page_setup()
-PAGE_KEYS = {"처음": "home", "내 경험 정리": "profile", "설정": "settings", "회사 맞춤 작성": "write"}
-ui.tutorial_panel(PAGE_KEYS.get(pages.title, ""))
 pages.run()
 ui.footer()

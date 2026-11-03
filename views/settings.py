@@ -56,16 +56,14 @@ with st.container(border=True, key="card_budget"):
             f"{model} 하루 상한 (오늘 {used}회 사용, 0 = 제한 없음)",
             min_value=0, value=int(limits.get(model, 0)), step=50, key=f"limit_{model}",
         )
+    st.caption("예비 모델은 쉼표로 여러 개 적으면 앞에서부터 차례로 써요. 예: gemini-3.5-flash-lite, gemma-4-26b-a4b-it")
     for role, label in (("writer", "작성"), ("judge", "평가")):
-        fb = config.setdefault("fallback", {}).setdefault(role, {})
-        c1, c2 = st.columns([1, 2])
-        fb["provider"] = c1.selectbox(
-            f"{label} 예비 제공자", ["", *providers],
-            index=["", *providers].index(fb.get("provider", "")), key=f"fb_p_{role}",
-        )
-        fb["model"] = c2.text_input(
-            f"{label} 예비 모델 (주 모델이 한도·장애일 때)", fb.get("model", ""), key=f"fb_m_{role}"
-        )
+        fbs = config.setdefault("fallback", {}).get(role) or []
+        fbs = fbs if isinstance(fbs, list) else [fbs]
+        names = ", ".join(f.get("model", "") for f in fbs if f.get("model"))
+        typed = st.text_input(f"{label} 예비 모델 (주 모델이 한도·장애일 때, 모두 Gemini 키 사용)", names, key=f"fb_{role}")
+        config["fallback"][role] = [{"provider": "openai" if m.strip().startswith("gpt") else "gemini", "model": m.strip()}
+                                    for m in typed.split(",") if m.strip()]
 
 if st.button("저장", type="primary", width="stretch"):
     save_config(config)

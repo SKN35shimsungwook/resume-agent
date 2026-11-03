@@ -28,7 +28,8 @@ DEFAULT_CONFIG = {
     # 유료 모델(OpenAI)은 자동으로 넘기지 않는다 — 크레딧을 아끼기 위해 직접 고를 때만 쓴다.
     "fallback": {
         "writer": {"provider": "gemini", "model": "gemini-3.1-flash-lite"},
-        "judge": {"provider": "gemini", "model": "gemma-4-26b-a4b-it"},
+        "judge": [{"provider": "gemini", "model": "gemini-3.5-flash-lite"},   # 빠른 예비 (혼잡할 때)
+                  {"provider": "gemini", "model": "gemma-4-26b-a4b-it"}],     # 느리지만 한도가 넉넉한 예비
     },
     # 모델별 하루 호출 상한. 0이면 제한 없음. 실제 요금제 한도보다 조금 낮게 둔다.
     "daily_limits": {},
@@ -139,9 +140,10 @@ def ask_json(
     if temperature is None:
         temperature = 0.6 if role == "writer" else 0.2
     specs = [config[role]]
-    fallback = (config.get("fallback") or {}).get(role) or {}
-    if fallback.get("provider") and fallback.get("model"):
-        specs.append(fallback)
+    fallback = (config.get("fallback") or {}).get(role) or []
+    for fb in (fallback if isinstance(fallback, list) else [fallback]):  # 예비는 하나 또는 여러 개(순서대로)
+        if fb.get("provider") and fb.get("model") and fb != config[role]:
+            specs.append(fb)
 
     last_error: Exception | None = None
     for spec in specs:
@@ -190,8 +192,8 @@ def _call_with_retry(config, role, spec, system, prompt, temperature, step) -> s
             code = _error_code(e)
             _log_usage({**entry, "ok": False, "secs": round(time.time() - started, 1),
                         "error": f"{code} {str(e)[:200]}"})
-            # 시간 초과(504·408)는 같은 모델로 1번만 더 해 보고 예비 모델로 넘긴다
-            if code not in RETRYABLE_CODES or attempt == retries or (code in (408, 504) and attempt >= 1):
+            # 시간 초과(504·408)·서버 혼잡(503)·서버 오류(500)는 같은 모델로 1번만 더 해 보고 예비 모델로 넘긴다
+            if code not in RETRYABLE_CODES or attempt == retries or (code in (408, 500, 503, 504) and attempt >= 1):
                 raise RuntimeError(f"{spec['model']} 호출 실패({code}): {str(e)[:300]}") from e
             # 2, 4, 8, 16초… 한도 초과(429)는 더 길게 쉰다
             time.sleep((2 ** (attempt + 1)) * (3 if code == 429 else 1))
