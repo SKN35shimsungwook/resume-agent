@@ -17,7 +17,8 @@ import re
 from datetime import datetime
 from pathlib import Path
 
-from .checks import grounding_violations, length_target, length_violations, novel_sentences, run_checks
+from .checks import (ground_info, grounding_violations, length_target, length_violations, novel_sentences,
+                     repeated_sentences, run_checks)
 from .knowledge import GROUPS
 from .llm import ask_json, load_config
 from .profile import cards_as_context, load_profile
@@ -59,6 +60,8 @@ def save_state(rid: str, state: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     state["updated"] = datetime.now().isoformat(timespec="seconds")
     path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+    from . import db  # 저장할 때마다 지원 현황 DB도 맞춘다 (파일이 원본, DB는 찾아보기용 색인)
+    db.sync(state)
 
 
 def list_runs() -> list[dict]:
@@ -94,7 +97,9 @@ final_answers = current_answers  # 이전 이름 호환
 def _payload(state: dict, cards_text: str, answers: list | None = None, extra: str = "") -> str:
     parts = [f"## 공고 분석\n{json.dumps(state['analysis'], ensure_ascii=False)}"]
     if state.get("research"):
-        parts.append(f"## 회사 리서치 (출처 있는 사실)\n{json.dumps(state['research'], ensure_ascii=False)}")
+        # 회사 정보 표·공고 비교는 나무위키 같은 참고용 자료가 섞일 수 있어 글쓰기에는 넘기지 않는다
+        facts = {k: v for k, v in state["research"].items() if k not in ("company_profile", "compare")}
+        parts.append(f"## 회사 리서치 (출처 있는 사실)\n{json.dumps(facts, ensure_ascii=False)}")
     parts.append(f"## 경험 카드 (사실 원장)\n{cards_text}")
     targets = []
     for q in state["analysis"].get("questions", []):
@@ -160,7 +165,8 @@ def build_base_resume(subrole: str, config: dict | None = None) -> dict:
 
 
 def run(posting_text: str, on_step=None, config: dict | None = None, mode: str | None = None,
-        extra_urls: list[str] | None = None, stop_after: str | None = None) -> dict:
+        extra_urls: list[str] | None = None, stop_after: str | None = None,
+        source_url: str = "", extra_text: str = "") -> dict:
     """공고 하나를 처리한다. on_step(step, state)는 진행 표시용. stop_after="analyze"면 적합도만 보고 멈춘다."""
     config = config or load_config()
     rid = run_id(posting_text)
@@ -169,6 +175,10 @@ def run(posting_text: str, on_step=None, config: dict | None = None, mode: str |
     state["mode"] = mode or state.get("mode") or "normal"
     if extra_urls:
         state["extra_urls"] = extra_urls
+    if source_url:
+        state["source_url"] = source_url
+    if extra_text.strip():
+        state["extra_text"] = extra_text.strip()
     profile = load_profile()
     if not profile.cards:
         raise ValueError("경험 카드가 없습니다. '내 경험 정리'에서 먼저 카드를 만들어 주세요.")
@@ -203,11 +213,13 @@ def run(posting_text: str, on_step=None, config: dict | None = None, mode: str |
             analysis["subrole_why"] = (f"(분석 결과 '{analysis.get('subrole')}'가 목록에 없어 기본값 사용) "
                                        + str(analysis.get("subrole_why", "")))
             analysis["subrole"] = (profile.target_roles or ["ax_external"])[0]
+        analysis["info"] = ground_info(analysis.get("info") or {}, posting_text)
         state["analysis"] = analysis
 
     def do_research():
         if config.get("research", True):
-            state["research"] = research(state["analysis"], posting_text, state.get("extra_urls"), config)
+            state["research"] = research(state["analysis"], posting_text, state.get("extra_urls"), config,
+                                         extra_text=state.get("extra_text", ""))
 
     def draft():
         state["draft"] = ask_json("writer", build_system_prompt("drafter", subrole()),
@@ -244,7 +256,7 @@ def run(posting_text: str, on_step=None, config: dict | None = None, mode: str |
                                       config=config, temperature=0.4, step=label)
             # 수정 모델이 문장을 고치지 않고 지워서 글이 줄어드는 일이 많았다 (30명 시험 평균 -31%).
             # 15% 넘게 줄었거나 분량·제한을 못 맞추면 한 번만 더 고친다.
-            again = length_violations(state["analysis"], current_answers(state))
+            again = length_violations(state["analysis"], current_answers(state)) + repeated_sentences(current_answers(state))
             for a in current_answers(state):
                 old = before.get(a.get("question", ""), 0)
                 if old and len(a.get("text", "")) < old * 0.85 and not any(v["question"] == a.get("question") for v in again):
@@ -319,6 +331,13 @@ def run(posting_text: str, on_step=None, config: dict | None = None, mode: str |
         state["status"] = "paused"
         state["error"] = str(e)[:500]
     save_state(rid, state)
+    if state["status"] == "done":
+        try:  # 다 쓰면 보관 PDF를 바로 남긴다 (실패해도 결과는 그대로 둔다)
+            from .archive import save as save_archive
+            save_archive(rid)
+            state = load_state(rid)
+        except Exception as e:
+            state["archive_error"] = str(e)[:200]
     return state
 
 

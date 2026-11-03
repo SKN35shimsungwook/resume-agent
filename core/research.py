@@ -36,18 +36,31 @@ def cached(company: str) -> dict | None:
     return json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
 
 
+# 누구나 고칠 수 있는 글: 회사 정보 정리·비교에만 쓰고 자소서 근거로는 쓰지 않는다
+REFERENCE_ONLY = ("namu.wiki", "wikipedia.org", "blog.naver.com", "tistory.com", "brunch.co.kr")
+
+
+def source_name(url: str) -> str:
+    return f"{url} (참고용)" if any(d in url for d in REFERENCE_ONLY) else url
+
+
 def research(analysis: dict, posting_text: str, extra_urls: list[str] | None = None,
-             config: dict | None = None, refresh: bool = False) -> dict:
+             config: dict | None = None, refresh: bool = False, extra_text: str = "") -> dict:
     company = analysis.get("company") or "unknown"
-    if not refresh and (hit := cached(company)):
+    urls = [u for u in [analysis.get("homepage", ""), *(extra_urls or [])] if u and u.startswith("http")]
+    hit = cached(company)
+    # 새 회사 자료(링크·붙여넣기)가 들어오면 저장된 결과가 있어도 다시 정리한다
+    new_material = any(source_name(u) not in (hit or {}).get("sources", []) for u in extra_urls or []) or extra_text
+    if not refresh and hit and not new_material:
         return hit
     sources = [("공고 원문", posting_text[:12000])]
-    urls = [u for u in [analysis.get("homepage", ""), *(extra_urls or [])] if u and u.startswith("http")]
     for url in dict.fromkeys(urls):
         try:
-            sources.append((url, load_url(url)[:8000]))
-        except Exception as e:  # 열리지 않는 페이지는 건너뛴다
-            sources.append((url, f"(열지 못함: {str(e)[:80]})"))
+            sources.append((source_name(url), load_url(url)[:8000]))
+        except Exception as e:  # 열리지 않는 페이지는 건너뛴다 (나무위키는 막힐 때가 많아 붙여넣기를 쓴다)
+            sources.append((source_name(url), f"(열지 못함: {str(e)[:80]})"))
+    if extra_text:
+        sources.append(("사용자가 붙여 넣은 회사 자료 (참고용)", extra_text[:8000]))
     body = "\n\n".join(f"## 출처: {name}\n{text}" for name, text in sources)
     result = ask_json("writer", build_system_prompt("researcher", analysis["subrole"]),
                       f"## 회사: {company}\n## 지원 직무: {analysis.get('position', '')}\n\n{body}",

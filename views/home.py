@@ -37,8 +37,8 @@ CARDS = [
      "views/profile.py", False),
     ("🏢", "회사 맞춤 작성", "공고를 넣으면 맞춤 초안을 쓰고 검증·수정까지 해요",
      "views/write.py", False),
-    ("✅", "결과·인사담당자 평가", "점수순으로 보고, 지적 사항과 면접 질문을 확인해요",
-     "views/write.py", False),
+    ("📋", "내 지원 현황", "언제 어디에 냈는지, 급여·근무지·마감과 보관 PDF를 한눈에 봐요",
+     "views/applications.py", False),
 ]
 
 cols = st.columns(3)

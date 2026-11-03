@@ -10,7 +10,8 @@ from core.loaders import load_file, load_url
 from core.pipeline import (APPLY_STATUSES, approve, char_count, current_answers, list_runs, restore,
                            resume_text, run, set_field, steps_for)
 from core.profile import ExperienceCard, load_profile, save_profile
-from core import demo
+from core import archive, demo
+from core.checks import INFO_FIELDS
 from core.paths import demo_on, runs_dir
 from core.research import search_links
 
@@ -46,32 +47,35 @@ with st.container(border=True, key="card_posting"):
             if tab_text.button(f"샘플 공고 넣기 · {name}", key=f"demo_post_{name}"):
                 st.session_state["pasted_posting"] = text
     pasted = tab_text.text_area("공고 내용 붙여넣기", height=160, key="pasted_posting")
-    extra = st.text_area("회사 자료 링크 (선택: 홈페이지 소개·기사·IR, 한 줄에 하나)", height=70,
-                         help="검색 엔진은 긁지 않고, 여기 넣은 페이지와 공고만 읽어서 회사를 정리해요.")
+    extra = st.text_area("회사 자료 링크 (선택: 홈페이지 소개·기사·IR·나무위키, 한 줄에 하나)", height=70,
+                         help="검색 엔진은 긁지 않고, 여기 넣은 페이지와 공고만 읽어서 회사를 정리해요. "
+                              "나무위키·블로그는 '참고용'으로 회사 정보 정리에만 쓰고 자소서 근거로는 쓰지 않아요.")
+    extra_text = st.text_area("회사 자료 붙여넣기 (선택: 링크가 안 열리는 페이지는 내용을 복사해 넣어 주세요)", height=70)
     c1, c2 = st.columns(2)
     mode = c1.radio("모드", ["normal", "precise"], horizontal=True,
-                    format_func=lambda m: {"normal": "일반 (호출 6~9번)", "precise": "정밀 (호출 13~17번)"}[m])
+                    format_func=lambda m: {"normal": "일반 (호출 9~15번)", "precise": "정밀 (호출 13~17번)"}[m])
     screen = c2.toggle("적합도만 먼저 보기", help="공고당 1번 호출로 분석·적합도만 보고 멈춰요. 마음에 드는 공고만 이어서 작성.")
 
     if st.button("▶ 시작", type="primary", width="stretch"):
-        postings = []
+        postings = []  # (공고 글, 공고 링크)
         for u in [u.strip() for u in urls.splitlines() if u.strip()]:
             try:
-                postings.append(load_url(u))
+                postings.append((load_url(u), u))
             except Exception as e:
                 st.error(f"{u}: {e}")
         for f in files or []:
             try:
-                postings.append(load_file(f.name, f.getvalue()))
+                postings.append((load_file(f.name, f.getvalue()), ""))
             except Exception as e:
                 st.error(f"{f.name}: {e}")
         if pasted.strip():
-            postings.append(pasted)
+            postings.append((pasted, ""))
         extra_urls = [u.strip() for u in extra.splitlines() if u.strip()]
-        for i, text in enumerate(postings, start=1):
+        for i, (text, link) in enumerate(postings, start=1):
             with st.status(f"공고 {i}/{len(postings)} 처리 중", expanded=True) as box:
                 state = run(text, on_step=lambda s, _: box.write(f"• {STEP_LABELS.get(s, s)}"), mode=mode,
-                            extra_urls=extra_urls, stop_after="analyze" if screen else None)
+                            extra_urls=extra_urls, stop_after="analyze" if screen else None,
+                            source_url=link, extra_text=extra_text)
                 company = state.get("analysis", {}).get("company", "")
                 label = {"done": "완료", "screened": "적합도 확인", "waiting": "확인 대기"}.get(state["status"])
                 if label:
@@ -146,7 +150,7 @@ for r in runs:
         new_status = c2.selectbox("지원 상태", APPLY_STATUSES, index=APPLY_STATUSES.index(r.get("apply_status", "준비")),
                                   key=f"st_{rid}", label_visibility="collapsed")
         if new_status != r.get("apply_status", "준비"):
-            set_field(rid, apply_status=new_status)
+            archive.set_status(rid, new_status)  # 처음 '제출'로 바꾼 날이 지원일, 보관 PDF도 다시 저장
             st.rerun()
 
         tabs = st.tabs(["최종 답변", "근거", "수정 기록", "검증 결과", "이력서", "인사담당자", "회사·공고", "내보내기"])
@@ -167,7 +171,8 @@ for r in runs:
                 edited = [dict(ans, text=st.session_state[f"ans_{rid}_{i}"]) for i, ans in enumerate(current_answers(r))]
                 hist = r.get("history", []) + [{"label": "직접 수정", "at": "", "answers": edited}]
                 set_field(rid, final={"answers": edited, "changes": []}, history=hist)
-                st.toast("저장했어요. 문장별 근거는 직접 고친 문장에는 맞지 않을 수 있어요.", icon="✅")
+                archive.save(rid)
+                st.toast("저장했어요. 보관 PDF도 고친 내용으로 바꿨어요.", icon="✅")
                 st.rerun()
             missing = r.get("draft", {}).get("missing_questions", [])
             if missing:
@@ -240,6 +245,22 @@ for r in runs:
                         for x in hr[key]:
                             st.markdown(f"- {x}")
         with tabs[6]:  # 회사·공고
+            info = a.get("info") or {}
+            if info:
+                st.markdown("**근무 조건** (공고 원문에서 근거를 찾은 것만)")
+                st.table({"항목": list(INFO_FIELDS.values()),
+                          "내용": [(info.get(k) or {}).get("value")
+                                 or (f"⚠️ 확인 필요 ('{info[k]['dropped']}' — 공고에서 근거 못 찾음)" if (info.get(k) or {}).get("dropped")
+                                     else "공고에 없음") for k in INFO_FIELDS]})
+            prof = (r.get("research") or {}).get("company_profile") or {}
+            if prof:
+                st.markdown(f"**회사 정보** — 위치: {', '.join(prof.get('locations') or []) or '-'} · 업종: {prof.get('industry') or '-'}"
+                            f" · 규모: {prof.get('size') or '-'} · 설립: {prof.get('founded') or '-'}")
+            compare = (r.get("research") or {}).get("compare") or []
+            if compare:
+                st.markdown("**공고와 회사 자료 비교**")
+                st.table({"항목": [c.get("item", "") for c in compare], "공고": [c.get("posting", "") for c in compare],
+                          "회사 자료": [c.get("company", "") for c in compare], "비교": [c.get("match", "") for c in compare]})
             st.markdown(f"**직무 판단**: `{a.get('subrole', '')}` — {a.get('subrole_why', '')}")
             if a.get("fit"):
                 st.markdown(f"**적합도 {a['fit'].get('score', '-')}** — {a['fit'].get('why', '')}")
@@ -254,6 +275,15 @@ for r in runs:
                 st.markdown("직접 찾아볼 곳: " + " · ".join(f"[{k}]({v})" for k, v in search_links(a["company"]).items()))
             st.json(a, expanded=False)
         with tabs[7]:  # 내보내기 + 사이트 입력
+            pdf_path = r.get("pdf_path")
+            st.markdown("**보관 PDF** — 자소서·이력서·회사 정보·인사담당자 평가·예상 면접 질문·공고 원문을 한 파일에 담아요.")
+            if pdf_path and Path(pdf_path).exists():
+                st.caption(f"저장 위치: `{pdf_path}`")
+                st.download_button("⬇ 보관 PDF 받기", Path(pdf_path).read_bytes(), file_name=Path(pdf_path).name,
+                                   key=f"arch_{rid}")
+            if st.button("보관 PDF 다시 만들기", key=f"rearch_{rid}"):
+                archive.save(rid)
+                st.rerun()
             name = f"{a.get('company', 'result')}_{a.get('position', '')}".replace(" ", "_")[:60]
             c1, c2 = st.columns(2)
             c1.download_button("⬇ DOCX", to_docx(r, profile), file_name=f"{name}.docx", key=f"docx_{rid}")

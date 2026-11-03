@@ -73,6 +73,23 @@ def length_violations(analysis: dict, answers: list) -> list[dict]:
     return found
 
 
+def _sentences(text: str) -> list[str]:
+    return [x.strip() for x in re.split(r"(?<=[다요])[.!?]\s*", text) if len(x.strip()) >= 25]
+
+
+def repeated_sentences(answers: list) -> list[dict]:
+    """PL-2: 분량을 채우려고 같은 경험 문장을 되풀이한 곳 (고친 뒤 시험에서 '이러한 ~ 경험과' 반복이 생겼다)."""
+    found, seen = [], []
+    for a in answers:
+        for sent in _sentences(a.get("text", "")):
+            if any(similarity(sent, prev) >= 0.6 for prev in seen):
+                found.append({"rule": "PL-2", "question": a.get("question", ""), "sentence": sent,
+                              "why": "앞에서 쓴 문장과 거의 같은 내용을 되풀이했다.",
+                              "fix_hint": "반복을 지우고, 그 자리를 아직 쓰지 않은 카드 사실이나 공고 업무와의 연결로 채운다."})
+            seen.append(sent)
+    return found
+
+
 def run_checks(analysis: dict, draft: dict, cards: list, cards_text: str, other_companies: list[str],
                other_texts: list[str] | None = None) -> list[dict]:
     """draft는 drafter/reviser 출력({answers: [...]})."""
@@ -88,7 +105,7 @@ def run_checks(analysis: dict, draft: dict, cards: list, cards_text: str, other_
         if q and q not in answered and not any(q[:15] in a for a in answered):
             violations.append({"rule": "FC-4", "question": q, "sentence": "", "why": "이 문항의 답변이 없다."})
 
-    violations += length_violations(analysis, answers)
+    violations += length_violations(analysis, answers) + repeated_sentences(answers)
     main_cards = {}
     for a in answers:
         q, text = a.get("question", ""), a.get("text", "")
@@ -210,3 +227,27 @@ def novel_sentences(answers: list, source_text: str, min_novel: int = 3, min_rat
                               "why": f"경험 카드·공고에 없는 낱말이 많다: {', '.join(novel[:6])}",
                               "fix_hint": "카드에 있는 사실로 바꾸거나 지우고, 필요하면 확인 질문으로 돌린다."})
     return found
+
+
+INFO_FIELDS = {"employment": "고용 형태", "deadline": "마감일", "salary": "급여", "location": "근무지",
+               "hours": "근무 시간", "benefits": "복지", "headcount": "모집 인원"}
+
+
+def ground_info(info: dict, posting_text: str) -> dict:
+    """공고 근무 조건을 근거 문구로 검사한다. 근거가 공고 원문에 글자 그대로 없으면 값을 비우고 dropped에 남긴다.
+
+    링커리어 페이지에는 다른 회사 예시가 섞여 있어(30명 시험: 남의 '최대 800자'를 가져옴),
+    근거 문구가 있어도 원문 안에 있는지만 볼 뿐 어느 회사 것인지는 사람이 확인해야 한다.
+    """
+    src = re.sub(r"\s", "", posting_text)
+    out = {}
+    for key in INFO_FIELDS:
+        item = info.get(key) or {}
+        if not isinstance(item, dict):
+            item = {"value": str(item), "quote": ""}
+        value, quote = str(item.get("value") or "").strip(), str(item.get("quote") or "").strip()
+        if value and (not quote or re.sub(r"\s", "", quote) not in src):
+            out[key] = {"value": "", "quote": "", "dropped": value}
+        else:
+            out[key] = {"value": value, "quote": quote}
+    return out
