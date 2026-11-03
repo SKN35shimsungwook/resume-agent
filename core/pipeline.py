@@ -17,7 +17,7 @@ import re
 from datetime import datetime
 from pathlib import Path
 
-from .checks import grounding_violations, novel_sentences, run_checks
+from .checks import grounding_violations, length_target, length_violations, novel_sentences, run_checks
 from .knowledge import GROUPS
 from .llm import ask_json, load_config
 from .profile import cards_as_context, load_profile
@@ -96,6 +96,12 @@ def _payload(state: dict, cards_text: str, answers: list | None = None, extra: s
     if state.get("research"):
         parts.append(f"## 회사 리서치 (출처 있는 사실)\n{json.dumps(state['research'], ensure_ascii=False)}")
     parts.append(f"## 경험 카드 (사실 원장)\n{cards_text}")
+    targets = []
+    for q in state["analysis"].get("questions", []):
+        lo, hi = length_target(q.get("limit") or 0)
+        targets.append(f"- {q.get('question', '')[:60]} → {lo}~{hi}자" + ("" if q.get("limit") else " (제한 없음, 기본 목표)"))
+    if targets:
+        parts.append("## 분량 목표 (공백 포함)\n" + "\n".join(targets))
     if answers is not None:
         parts.append(f"## 현재 답변\n{_answers_text(answers)}\n\n(문장별 근거)\n{json.dumps(answers, ensure_ascii=False)}")
     if state.get("resume"):
@@ -231,10 +237,26 @@ def run(posting_text: str, on_step=None, config: dict | None = None, mode: str |
             found = found_fn()
             if not found:
                 return  # 위반이 없으면 호출하지 않는다
+            before = {a.get("question", ""): len(a.get("text", "")) for a in current_answers(state)}
             extra = f"## 고칠 것 (이것만 고친다)\n{json.dumps(found, ensure_ascii=False)}"
             state["final"] = ask_json("writer", build_system_prompt("reviser", subrole()),
                                       _payload(state, cards_text, current_answers(state), extra),
                                       config=config, temperature=0.4, step=label)
+            # 수정 모델이 문장을 고치지 않고 지워서 글이 줄어드는 일이 많았다 (30명 시험 평균 -31%).
+            # 15% 넘게 줄었거나 분량·제한을 못 맞추면 한 번만 더 고친다.
+            again = length_violations(state["analysis"], current_answers(state))
+            for a in current_answers(state):
+                old = before.get(a.get("question", ""), 0)
+                if old and len(a.get("text", "")) < old * 0.85 and not any(v["question"] == a.get("question") for v in again):
+                    again.append({"rule": "FC-4", "question": a.get("question", ""), "sentence": "",
+                                  "why": f"수정 전 {old}자에서 {len(a.get('text', ''))}자로 줄었다. 지운 자리를 카드 사실로 다시 채운다."})
+            if again:
+                first = state["final"].get("changes", [])
+                state["final"] = ask_json("writer", build_system_prompt("reviser", subrole()),
+                                          _payload(state, cards_text, current_answers(state),
+                                                   f"## 고칠 것 (분량만 맞춘다)\n{json.dumps(again, ensure_ascii=False)}"),
+                                          config=config, temperature=0.4, step=f"{label}_length")
+                state["final"]["changes"] = first + state["final"].get("changes", [])
             state.setdefault("revisions", []).append({"after": label, "changes": state["final"].get("changes", [])})
             _snapshot(state, label)
         return _go

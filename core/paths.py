@@ -13,8 +13,8 @@ FLAG = REAL / ".demo_mode"
 
 
 def demo_on() -> bool:
-    # 시험 스크립트는 RA_WORKSPACE=real로 체험 모드 여부와 상관없이 실제 폴더를 쓴다
-    if os.getenv("RA_WORKSPACE") == "real":
+    # 시험 스크립트는 RA_WORKSPACE=real(실제 폴더) 또는 폴더 경로로 체험 모드 여부와 상관없이 그 폴더를 쓴다
+    if os.getenv("RA_WORKSPACE"):
         return False
     return FLAG.exists()
 
@@ -28,6 +28,9 @@ def set_demo(on: bool) -> None:
 
 
 def workspace() -> Path:
+    ws = os.getenv("RA_WORKSPACE")
+    if ws and ws != "real":
+        return Path(ws)
     return DEMO if demo_on() else REAL
 
 

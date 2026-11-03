@@ -43,6 +43,36 @@ def _references() -> list[tuple[str, str]]:
     return [(p.name, p.read_text(encoding="utf-8", errors="replace")) for p in reference_dir().glob("*.txt")]
 
 
+def length_target(limit: int) -> tuple[int, int]:
+    """문항의 분량 목표 (공백 포함). 제한이 없으면 600~800자: 30명 시험에서 제한 없는 문항이 200~400자로 끝났다."""
+    return (int(limit * 0.8), limit) if limit else (600, 800)
+
+
+def _limit_of(analysis: dict, question: str) -> int:
+    for q in analysis.get("questions", []):
+        text = q.get("question", "")
+        if text == question or (text[:15] and text[:15] in question):
+            return q.get("limit", 0) or 0
+    return 0
+
+
+def length_violations(analysis: dict, answers: list) -> list[dict]:
+    """FC-4: 제한을 넘었거나 분량 목표에 크게 못 미친 답변."""
+    found = []
+    for a in answers:
+        q, n = a.get("question", ""), len(a.get("text", ""))
+        limit = _limit_of(analysis, q)
+        lo, hi = length_target(limit)
+        if limit and n > limit:
+            found.append({"rule": "FC-4", "question": q, "sentence": "",
+                          "why": f"{n}자로 제한 {limit}자를 넘었다.", "fix_hint": f"{n - lo}자쯤 줄여 {lo}~{limit}자로 맞춘다."})
+        elif n < lo * 0.85:
+            found.append({"rule": "FC-4", "question": q, "sentence": "",
+                          "why": f"{n}자로 분량 목표 {lo}~{hi}자에 못 미친다.",
+                          "fix_hint": "아직 쓰지 않은 카드 사실과 공고 업무·회사 리서치 연결 문장으로 늘린다(사실은 지어내지 않는다)."})
+    return found
+
+
 def run_checks(analysis: dict, draft: dict, cards: list, cards_text: str, other_companies: list[str],
                other_texts: list[str] | None = None) -> list[dict]:
     """draft는 drafter/reviser 출력({answers: [...]})."""
@@ -58,20 +88,10 @@ def run_checks(analysis: dict, draft: dict, cards: list, cards_text: str, other_
         if q and q not in answered and not any(q[:15] in a for a in answered):
             violations.append({"rule": "FC-4", "question": q, "sentence": "", "why": "이 문항의 답변이 없다."})
 
-    limits = {q.get("question", ""): q.get("limit", 0) for q in analysis.get("questions", [])}
+    violations += length_violations(analysis, answers)
     main_cards = {}
     for a in answers:
         q, text = a.get("question", ""), a.get("text", "")
-        # FC-4: 글자 수 (공백 포함)
-        limit = limits.get(q, 0)
-        if limit and len(text) > limit:
-            violations.append({"rule": "FC-4", "question": q, "sentence": "",
-                               "why": f"{len(text)}자로 제한 {limit}자를 넘었다.", "fix_hint": f"{len(text) - limit}자 이상 줄인다."})
-        # FC-4: 너무 짧음 (제한의 70% 미만)
-        if limit and len(text) < limit * 0.7:
-            violations.append({"rule": "FC-4", "question": q, "sentence": "",
-                               "why": f"{len(text)}자로 제한 {limit}자의 70%에 못 미친다.",
-                               "fix_hint": "공고의 회사·직무 내용과 연결하는 문장으로 채운다(사실은 지어내지 않는다)."})
         # 본문에 들어간 괄호 메모
         for memo in re.findall(r"\[[^\]]{2,40}\]", text):
             violations.append({"rule": "WR-2", "question": q, "sentence": memo,

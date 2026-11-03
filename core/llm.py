@@ -153,7 +153,11 @@ def ask_json(
                 _check_budget(config, spec["model"])
                 text = _call_with_retry(config, role, spec, system, prompt, temperature, step)
                 try:
-                    return _extract_json(text)
+                    data = _extract_json(text)
+                    # 가끔 객체 대신 목록만 보낸다 (30명 시험: verify_b가 위반 목록만 보냄) → 객체로 감싼다
+                    if isinstance(data, list):
+                        data = data[0] if len(data) == 1 and isinstance(data[0], dict) else {"violations": data}
+                    return data
                 except json.JSONDecodeError as e:
                     _log_usage({"ts": datetime.now().isoformat(timespec="seconds"),
                                 "date": datetime.now().strftime("%Y-%m-%d"), "role": role, "step": step,
