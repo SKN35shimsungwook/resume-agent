@@ -34,6 +34,8 @@ DEFAULT_CONFIG = {
     # 모델별 분당 호출 상한. 넘을 것 같으면 호출 전에 기다린다 (Gemini 무료 등급 대비).
     "rpm_limits": {},
     "timeout_sec": 90,
+    # 모델별 시간 제한(초). Gemma는 긴 입력에 90초를 넘길 때가 있다(504 실제 발생).
+    "timeouts": {"gemma-4-26b-a4b-it": 240},
     "max_retries": 4,
     "gemini_api_key": "",
     "openai_api_key": "",
@@ -87,7 +89,7 @@ def today_usage() -> dict:
             e = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if e.get("date") != today:
+        if e.get("date") != today or e.get("counted") is False:  # JSON 깨짐 기록은 호출 수에서 뺀다
             continue
         s = stats.setdefault(e["model"], {"calls": 0, "ok": 0, "in_tokens": 0, "out_tokens": 0})
         s["calls"] += 1
@@ -143,9 +145,19 @@ def ask_json(
     last_error: Exception | None = None
     for spec in specs:
         try:
-            _check_budget(config, spec["model"])
-            text = _call_with_retry(config, role, spec, system, prompt, temperature, step)
-            return _extract_json(text)
+            # 무료 모델은 가끔 JSON을 깨뜨려 보낸다 → 같은 모델로 2번까지 다시 요청
+            for parse_try in range(3):
+                _check_budget(config, spec["model"])
+                text = _call_with_retry(config, role, spec, system, prompt, temperature, step)
+                try:
+                    return _extract_json(text)
+                except json.JSONDecodeError as e:
+                    _log_usage({"ts": datetime.now().isoformat(timespec="seconds"),
+                                "date": datetime.now().strftime("%Y-%m-%d"), "role": role, "step": step,
+                                "provider": spec["provider"], "model": spec["model"], "ok": False,
+                                "counted": False, "error": f"JSON 깨짐: {str(e)[:120]}"})
+                    last_error = e
+            raise RuntimeError(f"{spec['model']} 응답 JSON이 3번 연속 깨졌습니다: {last_error}")
         except (BudgetExceeded, RuntimeError) as e:
             last_error = e  # 다음(예비) 모델로 넘어간다
     raise RuntimeError(f"모든 모델 호출에 실패했습니다: {last_error}")
@@ -153,7 +165,7 @@ def ask_json(
 
 def _call_with_retry(config, role, spec, system, prompt, temperature, step) -> str:
     key = _api_key(config, spec["provider"])
-    timeout = config.get("timeout_sec", 90)
+    timeout = (config.get("timeouts") or {}).get(spec["model"], config.get("timeout_sec", 90))
     retries = config.get("max_retries", 4)
     for attempt in range(retries + 1):
         _wait_for_rpm(config, spec["model"])
@@ -177,7 +189,8 @@ def _call_with_retry(config, role, spec, system, prompt, temperature, step) -> s
             code = _error_code(e)
             _log_usage({**entry, "ok": False, "secs": round(time.time() - started, 1),
                         "error": f"{code} {str(e)[:200]}"})
-            if code not in RETRYABLE_CODES or attempt == retries:
+            # 시간 초과(504·408)는 같은 모델로 1번만 더 해 보고 예비 모델로 넘긴다
+            if code not in RETRYABLE_CODES or attempt == retries or (code in (408, 504) and attempt >= 1):
                 raise RuntimeError(f"{spec['model']} 호출 실패({code}): {str(e)[:300]}") from e
             # 2, 4, 8, 16초… 한도 초과(429)는 더 길게 쉰다
             time.sleep((2 ** (attempt + 1)) * (3 if code == 429 else 1))

@@ -28,17 +28,36 @@ missing_questions 배열에 카드 title과 함께 적어줘.
 """
 
 
+CHUNK = 40000  # 한 번에 보낼 글자 수. 넘으면 문서를 나눠 여러 번 추출한 뒤 합친다.
+
+
+def _chunks(documents: dict) -> list[str]:
+    parts, current = [], ""
+    for name, text in documents.items():
+        for start in range(0, max(1, len(text)), CHUNK):
+            label = f" (부분 {start // CHUNK + 1})" if len(text) > CHUNK else ""
+            piece = f"## {name}{label}\n{text[start:start + CHUNK]}"
+            if current and len(current) + len(piece) > CHUNK:
+                parts.append(current)
+                current = ""
+            current += ("\n\n" if current else "") + piece
+    if current:
+        parts.append(current)
+    return parts
+
+
 def extract_cards(documents: dict) -> tuple[list[ExperienceCard], list[dict]]:
-    joined = "\n\n".join(f"## {name}\n{text}" for name, text in documents.items())
-    # 추출은 창작이 아니라 옮겨 적기라서 온도를 낮춘다.
-    data = ask_json(
-        "writer", SYSTEM, PROMPT.format(kinds=", ".join(CARD_KINDS), documents=joined[:60000]),
-        temperature=0.2,
-    )
     fields = ExperienceCard.__dataclass_fields__
-    cards = []
-    for raw in data.get("cards", []):
-        clean = {k: v for k, v in raw.items() if k in fields and k != "id"}
-        if clean.get("title"):
-            cards.append(ExperienceCard(**clean))
-    return cards, data.get("missing_questions", [])
+    cards, questions, seen = [], [], set()
+    for chunk in _chunks(documents):
+        # 추출은 창작이 아니라 옮겨 적기라서 온도를 낮춘다.
+        data = ask_json("writer", SYSTEM, PROMPT.format(kinds=", ".join(CARD_KINDS), documents=chunk),
+                        temperature=0.2, step="extract")
+        for raw in data.get("cards", []):
+            clean = {k: v for k, v in raw.items() if k in fields and k != "id"}
+            key = (clean.get("title", ""), clean.get("period", ""))
+            if clean.get("title") and key not in seen:  # 나눠 보낸 조각끼리 겹친 카드는 하나만
+                seen.add(key)
+                cards.append(ExperienceCard(**clean))
+        questions += data.get("missing_questions", [])
+    return cards, questions

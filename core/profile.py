@@ -8,8 +8,7 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-DATA_DIR = Path(__file__).resolve().parent.parent / "data"
-PROFILE_PATH = DATA_DIR / "profile.json"
+from .paths import profile_path
 
 CARD_KINDS = ["경력", "프로젝트", "교육", "수상·자격", "대외활동", "기타"]
 
@@ -44,7 +43,8 @@ class Profile:
     cards: list = field(default_factory=list)          # ExperienceCard 목록
 
 
-def load_profile(path: Path = PROFILE_PATH) -> Profile:
+def load_profile(path: Path | None = None) -> Profile:
+    path = path or profile_path()
     if not path.exists():
         return Profile()
     data = json.loads(path.read_text(encoding="utf-8"))
@@ -52,7 +52,8 @@ def load_profile(path: Path = PROFILE_PATH) -> Profile:
     return Profile(**data, cards=cards)
 
 
-def save_profile(profile: Profile, path: Path = PROFILE_PATH) -> None:
+def save_profile(profile: Profile, path: Path | None = None) -> None:
+    path = path or profile_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         json.dumps(asdict(profile), ensure_ascii=False, indent=2), encoding="utf-8"

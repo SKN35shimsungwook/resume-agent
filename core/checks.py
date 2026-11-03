@@ -4,6 +4,11 @@
 """
 import re
 from collections import Counter
+from pathlib import Path
+
+# 표절·획일성 점검용 참고 글 모음 (예시·합격 자소서 등). 사용자가 .txt로 넣는다. 비공개 폴더.
+from .paths import reference_dir
+SIMILAR_LIMIT = 0.35  # 5글자 조각 겹침 비율이 이보다 높으면 경고
 
 # WR-3: 근거 없이 쓰이는 자기평가·상투 표현 (조사 보고서의 금지 패턴 기반, 계속 늘린다)
 CLICHES = [
@@ -20,10 +25,28 @@ def _numbers(text: str) -> set[str]:
     return {re.sub(r"[,\s]|퍼센트", "", m.group()).rstrip("%") for m in NUMBER.finditer(text)}
 
 
-def run_checks(analysis: dict, draft: dict, cards: list, cards_text: str, other_companies: list[str]) -> list[dict]:
+def _shingles(text: str, n: int = 5) -> set[str]:
+    t = re.sub(r"\s+", "", text)
+    return {t[i:i + n] for i in range(max(0, len(t) - n + 1))}
+
+
+def similarity(a: str, b: str) -> float:
+    """두 글이 얼마나 겹치는지 (내 답변 기준 5글자 조각 비율, 0~1)."""
+    sa, sb = _shingles(a), _shingles(b)
+    return len(sa & sb) / len(sa) if sa else 0.0
+
+
+def _references() -> list[tuple[str, str]]:
+    if not reference_dir().exists():
+        return []
+    return [(p.name, p.read_text(encoding="utf-8", errors="replace")) for p in reference_dir().glob("*.txt")]
+
+
+def run_checks(analysis: dict, draft: dict, cards: list, cards_text: str, other_companies: list[str],
+               other_texts: list[str] | None = None) -> list[dict]:
     """draft는 drafter/reviser 출력({answers: [...]})."""
     violations = []
-    card_ids = {c.id for c in cards}
+    card_ids = {c.id for c in cards} | {"posting"}  # posting = 공고에 적힌 회사·직무 사실
     allowed_numbers = _numbers(cards_text)
     answers = draft.get("answers", [])
     asked = [q.get("question", "") for q in analysis.get("questions", [])]
@@ -43,6 +66,15 @@ def run_checks(analysis: dict, draft: dict, cards: list, cards_text: str, other_
         if limit and len(text) > limit:
             violations.append({"rule": "FC-4", "question": q, "sentence": "",
                                "why": f"{len(text)}자로 제한 {limit}자를 넘었다.", "fix_hint": f"{len(text) - limit}자 이상 줄인다."})
+        # FC-4: 너무 짧음 (제한의 70% 미만)
+        if limit and len(text) < limit * 0.7:
+            violations.append({"rule": "FC-4", "question": q, "sentence": "",
+                               "why": f"{len(text)}자로 제한 {limit}자의 70%에 못 미친다.",
+                               "fix_hint": "공고의 회사·직무 내용과 연결하는 문장으로 채운다(사실은 지어내지 않는다)."})
+        # 본문에 들어간 괄호 메모
+        for memo in re.findall(r"\[[^\]]{2,40}\]", text):
+            violations.append({"rule": "WR-2", "question": q, "sentence": memo,
+                               "why": "답변 본문에 괄호 메모가 들어 있다.", "fix_hint": "메모를 지운다."})
         # FA-1: 근거 카드 id
         used = Counter()
         for s in a.get("sentences", []):
@@ -69,6 +101,19 @@ def run_checks(analysis: dict, draft: dict, cards: list, cards_text: str, other_
             if c in text:
                 violations.append({"rule": "WR-3", "question": q, "sentence": c,
                                    "why": "근거 없는 자기평가·상투 표현이다.", "fix_hint": "행동과 결과로 바꿔 쓴다."})
+
+    # PL-1: 표절·획일성 — 참고 글(예시 자소서)이나 다른 회사에 낸 내 답변과 너무 겹치는지
+    refs = _references() + [(f"다른 공고 답변 {i + 1}", t) for i, t in enumerate(other_texts or []) if t]
+    for a in answers:
+        text = a.get("text", "")
+        if len(text) < 100:
+            continue
+        for name, ref in refs:
+            sim = similarity(text, ref)
+            if sim >= SIMILAR_LIMIT:
+                violations.append({"rule": "PL-1", "question": a.get("question", ""), "sentence": name,
+                                   "why": f"'{name}'와 {sim:.0%} 겹친다. 회사명만 바꾼 글처럼 읽힐 수 있다.",
+                                   "fix_hint": "이 회사의 사업·직무 과제와 연결된 문장으로 바꾼다."})
 
     # MA-1: 문항 간 주 경험 중복
     dup = [cid for cid, n in Counter(main_cards.values()).items() if n > 1]

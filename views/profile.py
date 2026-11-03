@@ -4,11 +4,15 @@ import streamlit as st
 
 from core import ui
 from core.extract import extract_cards
+from core.knowledge import GROUPS, SUBROLE_LABELS
+from core.paths import workspace
 from core.loaders import load_file, load_url
 from core.profile import CARD_KINDS, ExperienceCard, load_profile, save_profile
 
-if "profile" not in st.session_state:
+# 체험 모드를 켜고 끌 때 다른 폴더의 데이터를 들고 있지 않도록, 작업 폴더가 바뀌면 다시 읽는다
+if st.session_state.get("profile_ws") != str(workspace()):
     st.session_state.profile = load_profile()
+    st.session_state.profile_ws = str(workspace())
 profile = st.session_state.profile
 
 ui.back_link()
@@ -79,8 +83,12 @@ with st.container(border=True, key="card_cards"):
         profile.phone = c3.text_input("연락처", profile.phone)
         profile.summary = st.text_input("한 줄 소개", profile.summary)
         profile.education = st.text_area("학력", profile.education, height=80)
-        roles = st.text_input("희망 직무 (쉼표로 구분)", ", ".join(profile.target_roles))
-        profile.target_roles = [r.strip() for r in roles.split(",") if r.strip()]
+        options = [s for subs in GROUPS.values() for s in subs]
+        profile.target_roles = st.multiselect(
+            "희망 세부 직무 (먼저 고른 것이 공고 분석이 애매할 때 기본값)", options,
+            default=[r for r in profile.target_roles if r in options],
+            format_func=lambda s: f"{SUBROLE_LABELS.get(s, s)} ({s})",
+        )
 
     for idx, card in enumerate(profile.cards):
         with st.expander(f"{card.kind} · {card.title}  ·  {card.period or '기간 미입력'}"):

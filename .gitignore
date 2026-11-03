@@ -1,5 +1,6 @@
 # 개인정보 — 공개 저장소라 절대 커밋하지 않는다
 data/
+data_demo/
 .env
 .streamlit/secrets.toml
 *_session.json

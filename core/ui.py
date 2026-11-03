@@ -25,6 +25,7 @@ CSS = """
   display:flex; align-items:center; justify-content:center; font-size:1.05rem; }
 .ra-badge { background:#E6F6EC; color:#1FA34A; font-size:.8rem; font-weight:700;
   padding:6px 12px; border-radius:999px; }
+.ra-badge-demo { background:#FFF4D6; color:#B7791F; }
 
 .ra-steps { display:flex; align-items:center; gap:10px; margin: .2rem 0 1.1rem; flex-wrap: wrap; }
 .ra-step { display:flex; align-items:center; gap:8px; font-size:.88rem; font-weight:700; color:#5B6475; }
@@ -54,12 +55,16 @@ CSS = """
 
 
 def page_setup() -> None:
+    from .paths import demo_on
+
     st.html(CSS)
+    badge = ('<div class="ra-badge ra-badge-demo">🧪 체험 모드 · 가상 데이터</div>' if demo_on()
+             else '<div class="ra-badge">🔒 내 자료는 이 PC에만 저장돼요</div>')
     st.html(
-        """
+        f"""
         <div class="ra-header">
           <div class="ra-logo"><div class="ra-logo-mark">✓</div>맞춤 자소서 에이전트</div>
-          <div class="ra-badge">🔒 내 자료는 이 PC에만 저장돼요</div>
+          {badge}
         </div>
         """
     )
@@ -92,6 +97,11 @@ def tiles(items: list[tuple[str, str]]) -> None:
 
 
 def footer() -> None:
+    from .paths import demo_on
+
+    if demo_on():
+        st.html('<div class="ra-footer">체험 모드: 가상 데이터는 data_demo 폴더에 있고, 실제 내 데이터는 그대로 보관돼요.</div>')
+        return
     st.html(
         '<div class="ra-footer">자료는 data 폴더에만 저장되고, AI를 부를 때만 필요한 내용이 '
         "설정한 AI 서비스로 전송됩니다.</div>"

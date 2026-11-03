@@ -33,7 +33,10 @@ with st.container(border=True, key="card_model"):
 with st.container(border=True, key="card_verify"):
     st.markdown("**검증 방식**")
     config["confirm_each_round"] = st.toggle(
-        "5차 검증을 회차마다 멈추고 확인하기", config["confirm_each_round"]
+        "검증이 끝날 때마다 멈추고 확인하기 (일반 모드는 검증 뒤 1번, 정밀 모드는 회차마다)", config["confirm_each_round"]
+    )
+    config["research"] = st.toggle(
+        "회사 리서치 하기 (회사별로 처음 한 번만 호출, 이후 저장된 결과 재사용)", config.get("research", True)
     )
 
 with st.container(border=True, key="card_budget"):
