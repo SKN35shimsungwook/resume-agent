@@ -12,6 +12,7 @@ pages = st.navigation(
         st.Page("views/settings.py", title="설정"),
         st.Page("views/write.py", title="회사 맞춤 작성"),
         st.Page("views/applications.py", title="내 지원 현황"),
+        st.Page("views/review.py", title="인사담당자 첨삭"),
         st.Page("views/coming_soon.py", title="준비 중"),
     ],
     position="hidden",

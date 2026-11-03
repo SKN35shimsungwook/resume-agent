@@ -7,7 +7,7 @@ from pathlib import Path
 import streamlit as st
 
 from core import db, ui
-from core.pipeline import APPLY_STATUSES, load_state
+from core.pipeline import APPLY_STATUSES
 
 ui.back_link()
 st.markdown("## 📋 내 지원 현황")
@@ -88,21 +88,10 @@ if labels:
         if comp:
             st.markdown(f"**회사** — {comp['summary'] or ''}  \n위치: {comp['locations'] or '-'} · 업종: {comp['industry'] or '-'}"
                         f" · 규모: {comp['size'] or '-'}")
-        hr = load_state(pick["run_id"]).get("hr") or {}
-        if hr:
-            st.markdown(f"**인사담당자 평가 — {hr.get('total', '-')}점 · {hr.get('verdict', '-')}**")
-            if hr.get("scores"):
-                st.dataframe([{"평가 기준": s.get("item", ""), "점수": f"{s.get('score', '')}/{s.get('max', '')}",
-                               "근거": s.get("evidence", "")} for s in hr["scores"]], hide_index=True, width="stretch")
-            c1, c2 = st.columns(2)
-            with c1:
-                st.markdown("**지적 사항**")
-                for x in hr.get("reasons", []) or ["없음"]:
-                    st.markdown(f"- {x}")
-            with c2:
-                st.markdown("**예상 면접 질문**")
-                for i, q in enumerate(hr.get("interview_questions", []) or ["없음"], 1):
-                    st.markdown(f"{i}. {q}")
+        if pick["hr_total"] is not None:
+            if st.button(f"🖍️ 인사담당자 첨삭 보기 ({pick['hr_total']}점 {pick['verdict']})"):
+                st.session_state["review_rid"] = pick["run_id"]
+                st.switch_page("views/review.py")
         others = [r for r in rows if r["company"] == pick["company"] and r["run_id"] != pick["run_id"]]
         if others:
             st.caption("같은 회사 다른 지원: " + " · ".join(f"{o['position']} ({o['applied_on'] or o['status']})" for o in others))

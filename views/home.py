@@ -37,11 +37,13 @@ CARDS = [
      "views/profile.py", False),
     ("🏢", "회사 맞춤 작성", "공고를 넣으면 맞춤 초안을 쓰고 검증·수정까지 해요",
      "views/write.py", False),
+    ("🖍️", "인사담당자 첨삭", "내 지원서를 인사담당자가 채점하고 문장마다 지적해요",
+     "views/review.py", False),
     ("📋", "내 지원 현황", "언제 어디에 냈는지, 급여·근무지·마감과 보관 PDF를 한눈에 봐요",
      "views/applications.py", False),
 ]
 
-cols = st.columns(3)
+cols = st.columns(2) + st.columns(2)  # 카드 4개를 2×2로
 for i, (col, (icon, title, desc, page, soon)) in enumerate(zip(cols, CARDS)):
     with col.container(border=True, key=f"card_task_{i}"):
         soon_tag = '<span class="ra-soon">준비 중</span>' if soon else ""

@@ -164,6 +164,48 @@ def build_base_resume(subrole: str, config: dict | None = None) -> dict:
     return resume
 
 
+def _save_and_archive(rid: str, state: dict) -> None:
+    save_state(rid, state)
+    try:
+        from .archive import save as save_archive
+        save_archive(rid)
+    except Exception:
+        pass  # 보관 PDF가 실패해도 첨삭 결과는 남긴다
+
+
+def rescore(rid: str, config: dict | None = None) -> dict:
+    """인사담당자 첨삭 화면의 '다시 채점' (호출 1번). 직접 고친 뒤 점수가 어떻게 바뀌는지 본다."""
+    state = load_state(rid)
+    cards_text = cards_as_context(load_profile())
+    state.setdefault("hr_history", []).append({k: state.get("hr", {}).get(k) for k in ("total", "verdict")}
+                                              | {"at": datetime.now().isoformat(timespec="seconds")})
+    state["hr"] = ask_json("judge", build_system_prompt("judge", state["analysis"]["subrole"]),
+                           _payload(state, cards_text, current_answers(state)), config=config, step="hr_rescore")
+    state.pop("hr_applied", None)
+    _save_and_archive(rid, state)
+    return state
+
+
+def apply_hr_feedback(rid: str, config: dict | None = None) -> dict:
+    """인사담당자 첨삭 화면의 '지적대로 고치기' (호출 1번). 지적 사항만 고치고 새 사실은 만들지 않는다."""
+    state = load_state(rid)
+    hr = state.get("hr") or {}
+    found = hr.get("violations", []) + [{"rule": "HR", "why": r} for r in hr.get("reasons", [])]
+    if not found:
+        return state
+    cards_text = cards_as_context(load_profile())
+    extra = f"## 고칠 것 (인사담당자 지적, 이것만 고친다)\n{json.dumps(found, ensure_ascii=False)}"
+    state["final"] = ask_json("writer", build_system_prompt("reviser", state["analysis"]["subrole"]),
+                              _payload(state, cards_text, current_answers(state), extra),
+                              config=config, temperature=0.4, step="hr_apply")
+    state.setdefault("revisions", []).append({"after": "hr_apply", "changes": state["final"].get("changes", [])})
+    _snapshot(state, "인사담당자 첨삭 반영")
+    state["final_check"] = novel_sentences(current_answers(state), cards_text + "\n" + state["posting"])
+    state["hr_applied"] = True  # 점수는 '다시 채점'을 눌러야 바뀐다
+    _save_and_archive(rid, state)
+    return state
+
+
 def run(posting_text: str, on_step=None, config: dict | None = None, mode: str | None = None,
         extra_urls: list[str] | None = None, stop_after: str | None = None,
         source_url: str = "", extra_text: str = "") -> dict:
