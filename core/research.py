@@ -66,6 +66,10 @@ def research(analysis: dict, posting_text: str, extra_urls: list[str] | None = N
                       f"## 회사: {company}\n## 지원 직무: {analysis.get('position', '')}\n\n{body}",
                       config=config, temperature=0.2, step="research")
     result["sources"] = list(dict.fromkeys([*(result.get("sources") or []), *[n for n, _ in sources]]))
+    # 화면에 '무엇을 읽었고 무엇이 안 열렸는지' 보여 주려고 남긴다
+    result["read"] = [{"name": n, "ok": not t.startswith("(열지 못함"), "chars": len(t),
+                       "reference_only": "참고용" in n, "note": t[:120] if t.startswith("(열지 못함") else ""}
+                      for n, t in sources]
     research_cache_dir().mkdir(parents=True, exist_ok=True)
     (research_cache_dir() / f"{_slug(company)}.json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
     return result

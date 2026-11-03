@@ -107,3 +107,70 @@ def footer() -> None:
         "설정한 AI 서비스로 전송됩니다.</div>"
     )
 
+
+
+def show_analysis(state: dict) -> None:
+    """공고·회사 자료를 분석한 결과를 사람이 읽기 좋게 보여 준다 (작성 화면 아래쪽과 '회사·공고' 탭에서 같이 쓴다)."""
+    from .checks import INFO_FIELDS
+    from .research import search_links
+
+    a, res = state.get("analysis") or {}, state.get("research") or {}
+    if not a:
+        st.caption("아직 분석 전이에요.")
+        return
+    fit = a.get("fit") or {}
+    tiles([("회사", a.get("company") or "-"), ("직무", (a.get("position") or "-")[:18]),
+           ("적합도", f"{fit.get('score', '-')}점"), ("자소서 문항", f"{len(a.get('questions') or [])}개")])
+
+    st.markdown("**📄 공고에서 읽은 것**")
+    st.markdown(f"- 세부 직무: `{a.get('subrole', '')}` — {a.get('subrole_why', '')}")
+    for label, key in (("주요 업무", "duties"), ("필수 요건", "must"), ("우대 사항", "nice"), ("키워드", "keywords"),
+                       ("인재상", "talent")):
+        if a.get(key):
+            st.markdown(f"- {label}: " + ", ".join(map(str, a[key])))
+    for q in a.get("questions") or []:
+        st.markdown(f"  - 문항: {q.get('question', '')}" + (f" ({q['limit']}자)" if q.get("limit") else " (글자 수 제한 없음)"))
+
+    info = a.get("info") or {}
+    if info:
+        st.markdown("**💼 근무 조건** (공고 원문에서 근거를 찾은 것만)")
+        st.table({"항목": list(INFO_FIELDS.values()),
+                  "내용": [(info.get(k) or {}).get("value")
+                         or (f"⚠️ 확인 필요 ('{info[k]['dropped']}' — 공고에서 근거 못 찾음)" if (info.get(k) or {}).get("dropped")
+                             else "공고에 없음") for k in INFO_FIELDS],
+                  "공고 원문 근거": [(info.get(k) or {}).get("quote", "") for k in INFO_FIELDS]})
+
+    st.markdown("**🎯 나와 맞는 정도**")
+    st.markdown(f"{fit.get('why', '')}  \n강점: {', '.join(fit.get('strengths') or []) or '-'}  \n"
+                f"부족: {', '.join(fit.get('gaps') or []) or '-'}")
+
+    if not res:
+        st.caption("회사 리서치는 자소서를 쓰기 시작하면 해요. (적합도만 보기에서는 아직 안 해요)")
+        return
+    prof = res.get("company_profile") or {}
+    st.markdown("**🏢 회사 정보**")
+    if res.get("summary"):
+        st.markdown(res["summary"])
+    st.table({"항목": ["위치", "업종", "규모", "설립", "주요 사업", "주요 제품", "주요 고객"],
+              "내용": [", ".join(prof.get("locations") or []) or "-", prof.get("industry") or "-", prof.get("size") or "-",
+                     prof.get("founded") or "-", ", ".join(res.get("business") or []) or "-",
+                     ", ".join(res.get("products") or []) or "-", ", ".join(prof.get("main_customers") or []) or "-"]})
+    if res.get("compare"):
+        st.markdown("**🔍 공고 내용과 회사 자료 비교**")
+        st.table({"항목": [c.get("item", "") for c in res["compare"]], "공고": [c.get("posting", "") for c in res["compare"]],
+                  "회사 자료": [c.get("company", "") for c in res["compare"]],
+                  "비교": [c.get("match", "") for c in res["compare"]]})
+    if res.get("role_challenges"):
+        st.markdown("**🧩 이 직무가 풀어야 할 과제** (자소서 지원 동기에 쓰여요)")
+        for ch in res["role_challenges"]:
+            st.markdown(f"- {ch.get('challenge', '')} *({ch.get('source', '')})*")
+    st.markdown("**📚 읽은 자료**")
+    for s in res.get("read") or [{"name": n, "ok": True} for n in res.get("sources", [])]:
+        mark = "✅" if s.get("ok", True) else "❌ 열지 못함"
+        ref = " · 참고용 (자소서 근거로는 안 씀)" if s.get("reference_only") else ""
+        size = f" · {s['chars']:,}자" if s.get("chars") else ""
+        st.markdown(f"- {mark} {s.get('name', '')}{size}{ref}" + (f"  \n  {s['note']}" if s.get("note") else ""))
+    if any(not s.get("ok", True) for s in res.get("read") or []):
+        st.caption("안 열린 페이지는 내용을 복사해 '회사 자료 붙여넣기' 칸에 넣고 다시 시작하면 반영돼요.")
+    if a.get("company"):
+        st.markdown("직접 찾아볼 곳: " + " · ".join(f"[{k}]({v})" for k, v in search_links(a["company"]).items()))

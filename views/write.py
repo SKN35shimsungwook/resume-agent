@@ -7,13 +7,11 @@ import streamlit as st
 from core import ui
 from core.export import to_docx, to_pdf
 from core.loaders import load_file, load_url
-from core.pipeline import (APPLY_STATUSES, approve, char_count, current_answers, list_runs, restore,
+from core.pipeline import (APPLY_STATUSES, approve, char_count, current_answers, list_runs, load_state, restore,
                            resume_text, run, set_field, steps_for)
 from core.profile import ExperienceCard, load_profile, save_profile
 from core import archive, demo
-from core.checks import INFO_FIELDS
 from core.paths import demo_on, runs_dir
-from core.research import search_links
 
 ROOT = Path(__file__).resolve().parent.parent
 STEP_LABELS = {
@@ -71,11 +69,13 @@ with st.container(border=True, key="card_posting"):
         if pasted.strip():
             postings.append((pasted, ""))
         extra_urls = [u.strip() for u in extra.splitlines() if u.strip()]
+        st.session_state["just_ran"] = []
         for i, (text, link) in enumerate(postings, start=1):
             with st.status(f"공고 {i}/{len(postings)} 처리 중", expanded=True) as box:
                 state = run(text, on_step=lambda s, _: box.write(f"• {STEP_LABELS.get(s, s)}"), mode=mode,
                             extra_urls=extra_urls, stop_after="analyze" if screen else None,
                             source_url=link, extra_text=extra_text)
+                st.session_state["just_ran"].append(state["id"])
                 company = state.get("analysis", {}).get("company", "")
                 label = {"done": "완료", "screened": "적합도 확인", "waiting": "확인 대기"}.get(state["status"])
                 if label:
@@ -83,6 +83,21 @@ with st.container(border=True, key="card_posting"):
                 else:
                     box.update(label=f"공고 {i} 일시 멈춤 · {company} — 다시 시작하면 이어서 해요", state="error")
                     st.warning(state.get("error", ""))
+
+# ── 방금 넣은 공고의 분석 결과 ─────────────────────────────
+for _rid in st.session_state.get("just_ran", []):
+    _state = load_state(_rid)
+    if not _state:
+        continue
+    with st.container(border=True, key=f"card_analysis_{_rid}"):
+        _a = _state.get("analysis") or {}
+        c1, c2 = st.columns([5, 1], vertical_alignment="center")
+        c1.markdown(f"### 🔎 분석 결과 · {_a.get('company', '')}")
+        if c2.button("닫기", key=f"close_{_rid}"):
+            st.session_state["just_ran"].remove(_rid)
+            st.rerun()
+        ui.show_analysis(_state)
+        st.caption("자소서·검증 결과는 아래 결과 목록에서 이 공고를 펼쳐 보세요.")
 
 # ── 기본 이력서 ───────────────────────────────────────────
 with st.expander("세부 직무별 기본 이력서 (한 번 만들어 두면 공고마다 살짝 고쳐 써요)"):
@@ -245,34 +260,7 @@ for r in runs:
                         for x in hr[key]:
                             st.markdown(f"- {x}")
         with tabs[6]:  # 회사·공고
-            info = a.get("info") or {}
-            if info:
-                st.markdown("**근무 조건** (공고 원문에서 근거를 찾은 것만)")
-                st.table({"항목": list(INFO_FIELDS.values()),
-                          "내용": [(info.get(k) or {}).get("value")
-                                 or (f"⚠️ 확인 필요 ('{info[k]['dropped']}' — 공고에서 근거 못 찾음)" if (info.get(k) or {}).get("dropped")
-                                     else "공고에 없음") for k in INFO_FIELDS]})
-            prof = (r.get("research") or {}).get("company_profile") or {}
-            if prof:
-                st.markdown(f"**회사 정보** — 위치: {', '.join(prof.get('locations') or []) or '-'} · 업종: {prof.get('industry') or '-'}"
-                            f" · 규모: {prof.get('size') or '-'} · 설립: {prof.get('founded') or '-'}")
-            compare = (r.get("research") or {}).get("compare") or []
-            if compare:
-                st.markdown("**공고와 회사 자료 비교**")
-                st.table({"항목": [c.get("item", "") for c in compare], "공고": [c.get("posting", "") for c in compare],
-                          "회사 자료": [c.get("company", "") for c in compare], "비교": [c.get("match", "") for c in compare]})
-            st.markdown(f"**직무 판단**: `{a.get('subrole', '')}` — {a.get('subrole_why', '')}")
-            if a.get("fit"):
-                st.markdown(f"**적합도 {a['fit'].get('score', '-')}** — {a['fit'].get('why', '')}")
-                st.markdown("강점: " + ", ".join(a["fit"].get("strengths", [])) + "  \n부족: " + ", ".join(a["fit"].get("gaps", [])))
-            res = r.get("research")
-            if res:
-                st.markdown(f"**회사 요약**: {res.get('summary', '')}")
-                for ch in res.get("role_challenges", []):
-                    st.markdown(f"- 직무 과제: {ch.get('challenge', '')} *({ch.get('source', '')})*")
-                st.caption("출처: " + " · ".join(res.get("sources", [])))
-            if a.get("company"):
-                st.markdown("직접 찾아볼 곳: " + " · ".join(f"[{k}]({v})" for k, v in search_links(a["company"]).items()))
+            ui.show_analysis(r)
             st.json(a, expanded=False)
         with tabs[7]:  # 내보내기 + 사이트 입력
             pdf_path = r.get("pdf_path")
