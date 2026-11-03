@@ -151,6 +151,11 @@ for r in runs:
 
         tabs = st.tabs(["최종 답변", "근거", "수정 기록", "검증 결과", "이력서", "인사담당자", "회사·공고", "내보내기"])
         with tabs[0]:  # 최종 답변 + 확인 질문
+            suspects = r.get("final_check", [])
+            if suspects:
+                st.warning(f"최종본에 경험 카드에 없을 수 있는 문장이 {len(suspects)}개 있어요. 사실인지 확인하고, 아니면 고쳐서 저장하세요.")
+                for v in suspects:
+                    st.markdown(f"- `{v.get('sentence', '')[:80]}` — {v.get('why', '')}")
             limits = {q.get("question"): q.get("limit", 0) for q in a.get("questions", [])}
             for i, ans in enumerate(current_answers(r)):
                 with_sp, no_sp = char_count(ans.get("text", ""))

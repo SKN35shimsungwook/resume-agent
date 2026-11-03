@@ -20,14 +20,15 @@ CONFIG_PATH = DATA_DIR / "config.json"
 USAGE_PATH = DATA_DIR / "usage.jsonl"
 
 DEFAULT_CONFIG = {
-    # 기본은 무료 등급만 쓴다. 작성은 Gemini, 평가는 다른 계열(Gemma)로 자기 채점 편향을 줄인다.
+    # 기본은 무료 등급만 쓴다. 작성은 Gemini 3.5 Flash Lite, 평가는 세대가 다른 3.1 Flash Lite.
+    # (Gemma 4 26B는 분당 토큰 1.6만이라 호출당 2~4분 걸려 예비로 내렸다 — 2026-11-03 비교)
     "writer": {"provider": "gemini", "model": "gemini-3.5-flash-lite"},
-    "judge": {"provider": "gemini", "model": "gemma-4-26b-a4b-it"},
+    "judge": {"provider": "gemini", "model": "gemini-3.1-flash-lite"},
     # 주 모델이 한도에 걸리거나 계속 실패할 때 넘길 모델 (비워 두면 넘기지 않음).
     # 유료 모델(OpenAI)은 자동으로 넘기지 않는다 — 크레딧을 아끼기 위해 직접 고를 때만 쓴다.
     "fallback": {
         "writer": {"provider": "gemini", "model": "gemini-3.1-flash-lite"},
-        "judge": {"provider": "gemini", "model": "gemini-3.1-flash-lite"},
+        "judge": {"provider": "gemini", "model": "gemma-4-26b-a4b-it"},
     },
     # 모델별 하루 호출 상한. 0이면 제한 없음. 실제 요금제 한도보다 조금 낮게 둔다.
     "daily_limits": {},

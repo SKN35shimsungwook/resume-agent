@@ -3,6 +3,7 @@
 체험 모드를 켜도 API 키·설정(data/config.json), 사용량 기록(data/usage.jsonl),
 브라우저 로그인(data/browser_profile)은 실제 폴더를 그대로 쓴다. 무료 한도는 하나라서다.
 """
+import os
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -12,6 +13,9 @@ FLAG = REAL / ".demo_mode"
 
 
 def demo_on() -> bool:
+    # 시험 스크립트는 RA_WORKSPACE=real로 체험 모드 여부와 상관없이 실제 폴더를 쓴다
+    if os.getenv("RA_WORKSPACE") == "real":
+        return False
     return FLAG.exists()
 
 

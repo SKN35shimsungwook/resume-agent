@@ -17,7 +17,7 @@ import re
 from datetime import datetime
 from pathlib import Path
 
-from .checks import run_checks
+from .checks import grounding_violations, novel_sentences, run_checks
 from .knowledge import GROUPS
 from .llm import ask_json, load_config
 from .profile import cards_as_context, load_profile
@@ -27,7 +27,7 @@ from .research import research
 from .paths import base_resume_dir, runs_dir
 REVISE_2_BELOW = 70  # 인사담당자 점수가 이보다 낮으면 한 번 더 고친다
 PRECISE_ROUNDS = ["v1_fact", "v2_structure", "v3_fit", "v4_style", "v5_consistency"]
-ESSAY_STEPS = {"draft", "checks", "verify_a", "verify_b", "revise", "revise_2", *PRECISE_ROUNDS,
+ESSAY_STEPS = {"draft", "checks", "verify_a", "verify_b", "revise", "revise_2", "final_check", *PRECISE_ROUNDS,
                *[f"revise_{r}" for r in PRECISE_ROUNDS]}
 APPLY_STATUSES = ["준비", "제출", "서류 합격", "서류 탈락", "면접", "최종 합격", "포기"]
 
@@ -42,7 +42,7 @@ def steps_for(mode: str) -> list[str]:
         middle = [x for r in PRECISE_ROUNDS for x in (r, f"revise_{r}")]
     else:
         middle = ["verify_a", "verify_b", "revise"]
-    return head + middle + ["resume", "hr", "revise_2"]
+    return head + middle + ["resume", "hr", "revise_2", "final_check"]
 
 
 def run_id(posting_text: str) -> str:
@@ -217,8 +217,13 @@ def run(posting_text: str, on_step=None, config: dict | None = None, mode: str |
 
     def verify(kind):
         def _go():
-            state[kind] = ask_json("judge", build_system_prompt(kind, subrole()),
-                                   _payload(state, cards_text, current_answers(state)), config=config, step=kind)
+            result = ask_json("judge", build_system_prompt(kind, subrole()),
+                              _payload(state, cards_text, current_answers(state)), config=config, step=kind)
+            if kind == "verify_a":  # 사실성은 근거 문구를 코드가 원문과 글자 그대로 대조해서 판정한다
+                found, score = grounding_violations(result.get("claims", []), cards_text + "\n" + state["posting"])
+                result["violations"] = found + result.get("violations", [])
+                result["score"] = score
+            state[kind] = result
         return _go
 
     def revise(found_fn, label):
@@ -281,6 +286,9 @@ def run(posting_text: str, on_step=None, config: dict | None = None, mode: str |
         step("resume", tailored_resume)
         step("hr", hr)
         step("revise_2", revise_2)
+        # 최종본에 한 번 더 코드 검사 (호출 0번). 남은 의심 문장은 화면에 표시해 사람이 확인한다.
+        step("final_check", lambda: state.__setitem__(
+            "final_check", novel_sentences(current_answers(state), cards_text + "\n" + state["posting"])))
         state["status"] = "done"
         state.pop("waiting_at", None)
     except WaitForApproval:

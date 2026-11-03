@@ -2,6 +2,7 @@
 
 검증 원칙(knowledge/writing_principles.md)의 규칙 id로 위반을 돌려준다.
 """
+import json
 import re
 from collections import Counter
 from pathlib import Path
@@ -115,6 +116,9 @@ def run_checks(analysis: dict, draft: dict, cards: list, cards_text: str, other_
                                    "why": f"'{name}'와 {sim:.0%} 겹친다. 회사명만 바꾼 글처럼 읽힐 수 있다.",
                                    "fix_hint": "이 회사의 사업·직무 과제와 연결된 문장으로 바꾼다."})
 
+    # FA-1 보조: 카드·공고에 없는 낱말이 몰린 문장
+    violations += novel_sentences(answers, cards_text + "\n" + json.dumps(analysis, ensure_ascii=False))
+
     # MA-1: 문항 간 주 경험 중복
     dup = [cid for cid, n in Counter(main_cards.values()).items() if n > 1]
     for cid in dup:
@@ -122,3 +126,67 @@ def run_checks(analysis: dict, draft: dict, cards: list, cards_text: str, other_
         violations.append({"rule": "MA-1", "question": " / ".join(qs), "sentence": cid,
                            "why": f"카드 '{cid}'가 여러 문항의 주 경험으로 겹친다."})
     return violations
+
+
+def _norm(text: str) -> str:
+    return re.sub(r"[\s\"'“”‘’.,·()\[\]-]", "", text)
+
+
+def grounding_violations(claims: list[dict], source_text: str) -> tuple[list[dict], int]:
+    """검증 모델이 낸 주장별 근거 문구(quote)가 경험 카드·공고 원문에 실제로 있는지 글자 그대로 대조한다.
+
+    모델이 '근거 있다'고 말해도 문구가 원문에 없으면 위반으로 잡는다 (모델 성능에 덜 기대려는 장치).
+    돌려주는 값: (위반 목록, 사실성 점수 0~100)
+    """
+    src = _norm(source_text)
+    violations, ok = [], 0
+    for c in claims:
+        quote = (c.get("quote") or "").strip()
+        # 모델이 카드의 여러 항목을 이어 붙여 인용할 때가 있어서, 문장 조각마다 따로 대조한다
+        pieces = [_norm(x) for x in re.split(r"[.。/|\n]|(?<=다)\s", quote)]
+        pieces = [x for x in pieces if len(x) >= 4]
+        if pieces and all(x in src for x in pieces):
+            ok += 1
+            continue
+        why = ("근거 문구가 없다 — 경험 카드에 없는 내용일 수 있다." if not quote
+               else f"근거로 든 문구 '{quote[:40]}'가 경험 카드·공고에 그대로 없다.")
+        violations.append({"rule": "FA-1", "question": c.get("question", ""), "sentence": c.get("sentence", ""),
+                           "why": f"주장 '{c.get('claim', '')[:60]}': {why}",
+                           "fix_hint": "카드에 있는 사실로 바꾸거나, 없으면 지우고 확인 질문으로 돌린다."})
+    score = round(100 * ok / len(claims)) if claims else 100
+    return violations, score
+
+
+# FA-1 보조: 카드·공고에 없는 낱말이 몰린 문장 (모델 판단과 상관없이 코드로)
+_FUTURE = ("겠습니다", "하고자", "싶습니다", "지원했습니다", "지원합니다", "지원하였습니다", "되겠습니다")
+_COMMON = set("""이 그 저 제 저는 제가 당시 이후 이어 또한 그리고 이에 이러한 이런 이와 같은 같이 통해 위해 대해 함께 바탕 바탕으로
+경험 경험을 과정 과정에서 상황 상황에서 업무 업무를 직무 직무에 현장 현장에서 회사 고객 고객사 수행 수행했습니다 했습니다 있습니다
+되었습니다 됐습니다 있었습니다 약 중 및 등 더 먼저 다시 직접 정확하게 차분히 문제 문제를 해결 해결했습니다 대응 대응했습니다
+포기하지 않고 이를 겪고 달라고 요구할 따라 실시 통한 활용하여 활용해 위한 때 동안 이후에 단순히""".split())
+_JOSA = ("으로써", "으로서", "에서는", "에서", "으로", "에게", "까지", "부터", "처럼", "보다", "라는", "이라는", "하며", "하고",
+         "했고", "했으며", "하여", "해서", "을", "를", "이", "가", "은", "는", "의", "에", "와", "과", "도", "로", "만")
+
+
+def _stem(word: str) -> str:
+    w = re.sub(r"[^\w가-힣]", "", word)
+    for j in _JOSA:
+        if w.endswith(j) and len(w) > len(j) + 1:
+            return w[: -len(j)]
+    return w
+
+
+def novel_sentences(answers: list, source_text: str, min_novel: int = 3, min_ratio: float = 0.2) -> list[dict]:
+    src = re.sub(r"\s", "", source_text)
+    found = []
+    for a in answers:
+        for s in a.get("sentences") or [{"text": x} for x in re.split(r"(?<=다\.)\s*", a.get("text", "")) if x]:
+            text = s.get("text", "")
+            if any(f in text for f in _FUTURE):
+                continue  # 포부·다짐 문장은 사실 주장이 아니라서 넘어간다
+            words = [w for w in (_stem(x) for x in text.split()) if len(w) >= 2 and w not in _COMMON]
+            novel = [w for w in words if w[:2] not in src]
+            if len(novel) >= min_novel and len(novel) / max(1, len(words)) >= min_ratio:
+                found.append({"rule": "FA-1", "question": a.get("question", ""), "sentence": text,
+                              "why": f"경험 카드·공고에 없는 낱말이 많다: {', '.join(novel[:6])}",
+                              "fix_hint": "카드에 있는 사실로 바꾸거나 지우고, 필요하면 확인 질문으로 돌린다."})
+    return found
