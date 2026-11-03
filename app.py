@@ -15,5 +15,7 @@ pages = st.navigation(
     position="hidden",
 )
 ui.page_setup()
+PAGE_KEYS = {"처음": "home", "내 경험 정리": "profile", "설정": "settings", "회사 맞춤 작성": "write"}
+ui.tutorial_panel(PAGE_KEYS.get(pages.title, ""))
 pages.run()
 ui.footer()

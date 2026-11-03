@@ -242,10 +242,17 @@ def build(reset: bool = False) -> Path:
 
 
 def demo_postings() -> dict[str, str]:
-    return {"가나장비 CS 엔지니어 (문항 3개)": posting("posting_fse.md"),
+    return {"사아테크 스마트팩토리 (새 공고, 튜토리얼용)": posting("posting_smartfactory.md"),
+            "가나장비 CS 엔지니어 (문항 3개)": posting("posting_fse.md"),
             "다라소프트 프리세일즈 (문항 2개)": posting("posting_presales.md"),
             "마바전기 설비보전 (이력서만)": posting("posting_resume_only.md")}
 
 
 def apply_form_url() -> str:
     return (EXAMPLES / "apply_form.html").as_uri()
+
+
+def sample_resume() -> tuple[str, bytes]:
+    """튜토리얼에서 올려 볼 가상 이력서 파일."""
+    path = EXAMPLES / "resume_kim.txt"
+    return path.name, path.read_bytes()

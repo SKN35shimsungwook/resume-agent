@@ -106,3 +106,39 @@ def footer() -> None:
         '<div class="ra-footer">자료는 data 폴더에만 저장되고, AI를 부를 때만 필요한 내용이 '
         "설정한 AI 서비스로 전송됩니다.</div>"
     )
+
+
+def tutorial_panel(page_key: str) -> None:
+    """체험 모드에서 화면 위쪽에 '지금 할 일'을 띄운다."""
+    from . import demo, tutorial
+    from .paths import demo_on
+
+    if not demo_on():
+        return
+    done, current = tutorial.progress()
+    total = len(tutorial.STEPS)
+    with st.container(border=True, key="card_tutorial"):
+        st.progress(len(done) / total, text=f"🧭 튜토리얼 {len(done)}/{total}")
+        if current is None:
+            st.success("튜토리얼을 모두 마쳤어요! 처음 화면에서 '체험 끝내기'를 누르면 실제 데이터로 돌아가요.")
+        else:
+            n = tutorial.STEPS.index(current) + 1
+            st.markdown(f"**{n}단계 · {current.title}**" + (f"  ·  :orange[{current.ai}]" if current.ai else ""))
+            st.markdown(current.how)
+            page_path, page_name = tutorial.PAGES[current.page]
+            c1, c2, c3 = st.columns([2, 1, 1])
+            if current.page != page_key:
+                c1.page_link(page_path, label=f"{page_name} 화면으로 가기 →")
+            if current.id == "upload":
+                name, data = demo.sample_resume()
+                c1.download_button("⬇ 가상 이력서 받기", data, file_name=name, key="tut_resume")
+            if current.check is None and c2.button("했어요", key=f"tut_done_{current.id}", type="primary"):
+                tutorial.mark_done(current.id)
+                st.rerun()
+            if c3.button("건너뛰기", key=f"tut_skip_{current.id}"):
+                tutorial.mark_done(current.id)
+                st.rerun()
+        with st.expander("전체 단계 보기"):
+            for i, s in enumerate(tutorial.STEPS, start=1):
+                mark = "✅" if s.id in done else ("👉" if current and s.id == current.id else "⬜")
+                st.markdown(f"{mark} {i}. {s.title}" + (f" — *{s.ai}*" if s.ai else ""))
