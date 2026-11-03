@@ -1,7 +1,7 @@
 import streamlit as st
 
 from core import ui
-from core.llm import load_config, save_config
+from core.llm import load_config, save_config, today_usage
 
 config = load_config()
 
@@ -25,14 +25,44 @@ with st.container(border=True, key="card_model"):
             f"{label} 제공자", providers, index=providers.index(spec["provider"]), key=f"{role}_p"
         )
         spec["model"] = c2.text_input(f"{label} 모델", spec["model"], key=f"{role}_m")
-    if config["writer"]["provider"] == config["judge"]["provider"]:
-        st.warning("작성과 평가가 같은 제공자예요. 가능하면 다르게 두세요.")
+    if config["writer"]["model"] == config["judge"]["model"]:
+        st.warning("작성과 평가가 같은 모델이에요. 가능하면 다른 모델(계열)로 두세요.")
+    if "openai" in (config["writer"]["provider"], config["judge"]["provider"]):
+        st.info("OpenAI는 유료 크레딧을 써요. 무료 등급(Gemini·Gemma)만 쓰려면 둘 다 gemini로 두세요.")
 
 with st.container(border=True, key="card_verify"):
     st.markdown("**검증 방식**")
     config["confirm_each_round"] = st.toggle(
         "5차 검증을 회차마다 멈추고 확인하기", config["confirm_each_round"]
     )
+
+with st.container(border=True, key="card_budget"):
+    st.markdown("**호출 예산**")
+    st.caption("하루 공고 30개를 처리하다 멈추지 않도록, 모델별 하루 상한과 예비 모델을 정해요. 상한은 요금제 한도보다 조금 낮게 두세요.")
+    usage = today_usage()
+    ui.tiles([
+        ("오늘 호출", f"{sum(s['calls'] for s in usage.values())}회"),
+        ("성공", f"{sum(s['ok'] for s in usage.values())}회"),
+        ("입력 토큰", f"{sum(s['in_tokens'] for s in usage.values()):,}"),
+        ("출력 토큰", f"{sum(s['out_tokens'] for s in usage.values()):,}"),
+    ])
+    limits = config.setdefault("daily_limits", {})
+    for model in dict.fromkeys([config["writer"]["model"], config["judge"]["model"], *usage]):
+        used = usage.get(model, {}).get("calls", 0)
+        limits[model] = st.number_input(
+            f"{model} 하루 상한 (오늘 {used}회 사용, 0 = 제한 없음)",
+            min_value=0, value=int(limits.get(model, 0)), step=50, key=f"limit_{model}",
+        )
+    for role, label in (("writer", "작성"), ("judge", "평가")):
+        fb = config.setdefault("fallback", {}).setdefault(role, {})
+        c1, c2 = st.columns([1, 2])
+        fb["provider"] = c1.selectbox(
+            f"{label} 예비 제공자", ["", *providers],
+            index=["", *providers].index(fb.get("provider", "")), key=f"fb_p_{role}",
+        )
+        fb["model"] = c2.text_input(
+            f"{label} 예비 모델 (주 모델이 한도·장애일 때)", fb.get("model", ""), key=f"fb_m_{role}"
+        )
 
 if st.button("저장", type="primary", width="stretch"):
     save_config(config)

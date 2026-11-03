@@ -2,22 +2,49 @@
 
 같은 모델이 자기 글을 평가하면 점수를 후하게 주는 경향이 있어서, 글쓰기(writer)와
 검증·인사담당자 평가(judge)를 서로 다른 제공자로 돌리는 것을 기본으로 한다.
+
+하루 공고 30개를 처리하다 멈추지 않도록(docs/call-budget.md):
+- 호출마다 시간 제한, 429·5xx·시간 초과는 점점 길게 기다리며 재시도
+- 호출마다 data/usage.jsonl에 사용량 기록, 모델별 하루 상한을 넘기 전에 멈춤
+- 한도가 차거나 계속 실패하면 설정한 예비 모델로 넘김
 """
 import json
 import os
 import re
+import time
+from datetime import datetime
 from pathlib import Path
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 CONFIG_PATH = DATA_DIR / "config.json"
+USAGE_PATH = DATA_DIR / "usage.jsonl"
 
 DEFAULT_CONFIG = {
-    "writer": {"provider": "gemini", "model": "gemini-2.5-flash"},
-    "judge": {"provider": "openai", "model": "gpt-4o-mini"},
+    # 기본은 무료 등급만 쓴다. 작성은 Gemini, 평가는 다른 계열(Gemma)로 자기 채점 편향을 줄인다.
+    "writer": {"provider": "gemini", "model": "gemini-3.5-flash-lite"},
+    "judge": {"provider": "gemini", "model": "gemma-4-26b-a4b-it"},
+    # 주 모델이 한도에 걸리거나 계속 실패할 때 넘길 모델 (비워 두면 넘기지 않음).
+    # 유료 모델(OpenAI)은 자동으로 넘기지 않는다 — 크레딧을 아끼기 위해 직접 고를 때만 쓴다.
+    "fallback": {
+        "writer": {"provider": "gemini", "model": "gemini-3.1-flash-lite"},
+        "judge": {"provider": "gemini", "model": "gemini-3.1-flash-lite"},
+    },
+    # 모델별 하루 호출 상한. 0이면 제한 없음. 실제 요금제 한도보다 조금 낮게 둔다.
+    "daily_limits": {},
+    # 모델별 분당 호출 상한. 넘을 것 같으면 호출 전에 기다린다 (Gemini 무료 등급 대비).
+    "rpm_limits": {},
+    "timeout_sec": 90,
+    "max_retries": 4,
     "gemini_api_key": "",
     "openai_api_key": "",
     "confirm_each_round": False,
 }
+
+RETRYABLE_CODES = {408, 429, 500, 502, 503, 504}
+
+
+class BudgetExceeded(RuntimeError):
+    """오늘 이 모델의 호출 상한에 도달했다."""
 
 
 def load_config() -> dict:
@@ -41,32 +68,140 @@ def _api_key(config: dict, provider: str) -> str:
     return key
 
 
+# ── 사용량 기록 ───────────────────────────────────────────
+
+def _log_usage(entry: dict) -> None:
+    USAGE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with USAGE_PATH.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+
+def today_usage() -> dict:
+    """오늘 모델별 {calls, ok, in_tokens, out_tokens}."""
+    today = datetime.now().strftime("%Y-%m-%d")
+    stats: dict[str, dict] = {}
+    if not USAGE_PATH.exists():
+        return stats
+    for line in USAGE_PATH.read_text(encoding="utf-8").splitlines():
+        try:
+            e = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if e.get("date") != today:
+            continue
+        s = stats.setdefault(e["model"], {"calls": 0, "ok": 0, "in_tokens": 0, "out_tokens": 0})
+        s["calls"] += 1
+        s["ok"] += int(e.get("ok", False))
+        s["in_tokens"] += e.get("in_tokens") or 0
+        s["out_tokens"] += e.get("out_tokens") or 0
+    return stats
+
+
+def _check_budget(config: dict, model: str) -> None:
+    limit = (config.get("daily_limits") or {}).get(model, 0)
+    if limit and today_usage().get(model, {}).get("calls", 0) >= limit:
+        raise BudgetExceeded(f"{model} 오늘 호출 상한({limit}회)에 도달했습니다.")
+
+
+_recent_calls: dict[str, list[float]] = {}
+
+
+def _wait_for_rpm(config: dict, model: str) -> None:
+    """최근 60초 호출 수가 분당 상한에 닿았으면 자리가 날 때까지 기다린다."""
+    limit = (config.get("rpm_limits") or {}).get(model, 0)
+    if not limit:
+        return
+    calls = _recent_calls.setdefault(model, [])
+    while True:
+        now = time.time()
+        calls[:] = [t for t in calls if now - t < 60]
+        if len(calls) < limit:
+            calls.append(now)
+            return
+        time.sleep(60 - (now - calls[0]) + 0.5)
+
+
+# ── 호출 ──────────────────────────────────────────────────
+
 def ask_json(
-    role: str, system: str, prompt: str, config: dict | None = None, temperature: float | None = None
+    role: str, system: str, prompt: str, config: dict | None = None,
+    temperature: float | None = None, step: str = "",
 ) -> dict:
     """role은 'writer' 또는 'judge'. 응답은 JSON 객체로 받는다.
 
     temperature를 안 주면 작성은 0.6(문장 다양성), 평가는 0.2(채점 일관성).
+    step은 사용량 기록에 남길 단계 이름(예: "extract", "verify_a").
     """
     config = config or load_config()
-    spec = config[role]
-    key = _api_key(config, spec["provider"])
     if temperature is None:
         temperature = 0.6 if role == "writer" else 0.2
-    if spec["provider"] == "gemini":
-        text = _ask_gemini(key, spec["model"], system, prompt, temperature)
-    elif spec["provider"] == "openai":
-        text = _ask_openai(key, spec["model"], system, prompt, temperature)
-    else:
-        raise ValueError(f"알 수 없는 제공자: {spec['provider']}")
-    return _extract_json(text)
+    specs = [config[role]]
+    fallback = (config.get("fallback") or {}).get(role) or {}
+    if fallback.get("provider") and fallback.get("model"):
+        specs.append(fallback)
+
+    last_error: Exception | None = None
+    for spec in specs:
+        try:
+            _check_budget(config, spec["model"])
+            text = _call_with_retry(config, role, spec, system, prompt, temperature, step)
+            return _extract_json(text)
+        except (BudgetExceeded, RuntimeError) as e:
+            last_error = e  # 다음(예비) 모델로 넘어간다
+    raise RuntimeError(f"모든 모델 호출에 실패했습니다: {last_error}")
 
 
-def _ask_gemini(key: str, model: str, system: str, prompt: str, temperature: float) -> str:
+def _call_with_retry(config, role, spec, system, prompt, temperature, step) -> str:
+    key = _api_key(config, spec["provider"])
+    timeout = config.get("timeout_sec", 90)
+    retries = config.get("max_retries", 4)
+    for attempt in range(retries + 1):
+        _wait_for_rpm(config, spec["model"])
+        started = time.time()
+        entry = {
+            "ts": datetime.now().isoformat(timespec="seconds"),
+            "date": datetime.now().strftime("%Y-%m-%d"),
+            "role": role, "step": step, "provider": spec["provider"], "model": spec["model"],
+            "attempt": attempt,
+        }
+        try:
+            if spec["provider"] == "gemini":
+                text, usage = _ask_gemini(key, spec["model"], system, prompt, temperature, timeout)
+            elif spec["provider"] == "openai":
+                text, usage = _ask_openai(key, spec["model"], system, prompt, temperature, timeout)
+            else:
+                raise ValueError(f"알 수 없는 제공자: {spec['provider']}")
+            _log_usage({**entry, "ok": True, "secs": round(time.time() - started, 1), **usage})
+            return text
+        except Exception as e:  # noqa: BLE001 — 제공자마다 예외 종류가 달라 코드로 판단한다
+            code = _error_code(e)
+            _log_usage({**entry, "ok": False, "secs": round(time.time() - started, 1),
+                        "error": f"{code} {str(e)[:200]}"})
+            if code not in RETRYABLE_CODES or attempt == retries:
+                raise RuntimeError(f"{spec['model']} 호출 실패({code}): {str(e)[:300]}") from e
+            # 2, 4, 8, 16초… 한도 초과(429)는 더 길게 쉰다
+            time.sleep((2 ** (attempt + 1)) * (3 if code == 429 else 1))
+    raise RuntimeError("재시도 횟수를 넘었습니다.")
+
+
+def _error_code(e: Exception) -> int:
+    for attr in ("code", "status_code"):
+        value = getattr(e, attr, None)
+        if isinstance(value, int):
+            return value
+    name = type(e).__name__.lower()
+    if "timeout" in name or "timed out" in str(e).lower():
+        return 408
+    if "connection" in name:
+        return 503
+    return 0
+
+
+def _ask_gemini(key, model, system, prompt, temperature, timeout) -> tuple[str, dict]:
     from google import genai
     from google.genai import types
 
-    client = genai.Client(api_key=key)
+    client = genai.Client(api_key=key, http_options=types.HttpOptions(timeout=timeout * 1000))
     response = client.models.generate_content(
         model=model,
         contents=prompt,
@@ -74,24 +209,31 @@ def _ask_gemini(key: str, model: str, system: str, prompt: str, temperature: flo
             system_instruction=system,
             response_mime_type="application/json",
             temperature=temperature,
+            automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
         ),
     )
     if response.candidates and str(response.candidates[0].finish_reason).endswith("MAX_TOKENS"):
         raise ValueError("AI 응답이 출력 길이 제한에 걸려 중간에 잘렸습니다. 다시 시도해주세요.")
-    return response.text
+    u = response.usage_metadata
+    usage = {
+        "in_tokens": getattr(u, "prompt_token_count", None),
+        "out_tokens": (getattr(u, "candidates_token_count", 0) or 0) + (getattr(u, "thoughts_token_count", 0) or 0),
+    }
+    return response.text, usage
 
 
-def _ask_openai(key: str, model: str, system: str, prompt: str, temperature: float) -> str:
+def _ask_openai(key, model, system, prompt, temperature, timeout) -> tuple[str, dict]:
     from openai import OpenAI
 
-    client = OpenAI(api_key=key)
+    client = OpenAI(api_key=key, timeout=timeout, max_retries=0)  # 재시도는 위에서 직접 한다
     response = client.chat.completions.create(
         model=model,
         messages=[{"role": "system", "content": system}, {"role": "user", "content": prompt}],
         response_format={"type": "json_object"},
         temperature=temperature,
     )
-    return response.choices[0].message.content
+    usage = {"in_tokens": response.usage.prompt_tokens, "out_tokens": response.usage.completion_tokens}
+    return response.choices[0].message.content, usage
 
 
 def _extract_json(text: str) -> dict:

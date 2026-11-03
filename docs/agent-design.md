@@ -9,7 +9,7 @@
 | 항목 | 현재 값 | 이유 |
 |---|---|---|
 | 역할 | `writer`(작성), `judge`(평가) 두 가지 | 같은 모델이 자기 글을 채점하면 점수가 후해지는 편향을 줄이려고 |
-| 기본 모델 | writer = Gemini `gemini-2.5-flash`, judge = OpenAI `gpt-4o-mini` | 블로그 자동화 앱에서 쓰던 Gemini 재사용 + 평가는 다른 회사 모델. 설정 화면에서 바꿀 수 있음 |
+| 기본 모델 | writer = Gemini `gemini-3.5-flash-lite`, judge = `gemma-4-26b-a4b-it`, 예비 = `gemini-3.1-flash-lite` (모두 무료 등급) | 무료 한도 안에서만 돌리고, 평가는 다른 계열(Gemma)로 자기 채점 편향을 줄임. OpenAI는 수동 선택만(2026-11-02 변경, docs/call-budget.md) |
 | 응답 형식 | 항상 JSON (Gemini `response_mime_type`, OpenAI `json_object`) | 화면에 점수·목록으로 나눠 보여주려고 |
 | 온도 | 기본 writer 0.6, judge 0.2, 호출마다 바꿀 수 있음 | 작성은 표현이 다양하게, 채점은 매번 비슷하게 |
 | 잘림 처리 | Gemini가 출력 길이 제한에 걸리면 바로 에러 | 블로그 앱에서 겪은 "JSON 반쯤 잘림" 문제 재발 방지 |
