@@ -41,6 +41,8 @@ class Profile:
     education: str = ""
     raw_documents: dict = field(default_factory=dict)  # 파일 이름 → 추출한 텍스트
     cards: list = field(default_factory=list)          # ExperienceCard 목록
+    processed_docs: list = field(default_factory=list)  # 이미 카드로 만든 자료 이름 (다시 읽지 않는다)
+    open_questions: list = field(default_factory=list)  # AI 보완 질문 [{card_id, card, question}]
 
 
 def load_profile(path: Path | None = None) -> Profile:
@@ -58,6 +60,32 @@ def save_profile(profile: Profile, path: Path | None = None) -> None:
     path.write_text(
         json.dumps(asdict(profile), ensure_ascii=False, indent=2), encoding="utf-8"
     )
+
+
+def _norm(title: str) -> str:
+    return "".join(ch for ch in title.lower() if ch.isalnum())
+
+
+def find_card(profile: "Profile", card_id: str = "", title: str = "") -> ExperienceCard | None:
+    for c in profile.cards:
+        if (card_id and c.id == card_id) or (title and _norm(c.title) == _norm(title)):
+            return c
+    return None
+
+
+def is_duplicate(profile: "Profile", card: ExperienceCard) -> bool:
+    """이미 있는 카드와 제목이 같으면(띄어쓰기·기호 무시) 같은 경험으로 본다."""
+    return find_card(profile, title=card.title) is not None
+
+
+def add_answer(profile: "Profile", question: str, answer: str, card_id: str = "", title: str = "") -> ExperienceCard:
+    """보완 질문의 답을 해당 카드에 덧붙인다. 카드를 못 찾으면 '추가 확인 사실' 카드를 만든다."""
+    card = find_card(profile, card_id, title)
+    if card is None:
+        card = ExperienceCard(title=title or "추가 확인 사실", kind="기타")
+        profile.cards.append(card)
+    card.action = (card.action + f"\n(추가 확인) {question} → {answer}").strip()
+    return card
 
 
 def cards_as_context(profile: Profile) -> str:

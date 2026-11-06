@@ -10,6 +10,8 @@ ROOT = Path(__file__).resolve().parent.parent
 REAL = ROOT / "data"
 DEMO = ROOT / "data_demo"
 FLAG = REAL / ".demo_mode"
+TEST = ROOT / "data_test"  # 관리자 메뉴의 '시험 데이터 보기' (가상 인물 30명 × 실제 공고 30개)
+TEST_FLAG = REAL / ".test_mode"
 
 
 def demo_on() -> bool:
@@ -22,15 +24,32 @@ def demo_on() -> bool:
 def set_demo(on: bool) -> None:
     REAL.mkdir(parents=True, exist_ok=True)
     if on:
+        if TEST_FLAG.exists():
+            TEST_FLAG.unlink()
         FLAG.write_text("on", encoding="utf-8")
     elif FLAG.exists():
         FLAG.unlink()
+
+
+def test_on() -> bool:
+    return not os.getenv("RA_WORKSPACE") and TEST_FLAG.exists()
+
+
+def set_test(on: bool) -> None:
+    REAL.mkdir(parents=True, exist_ok=True)
+    if on:
+        set_demo(False)  # 체험과 시험 데이터는 동시에 켜지 않는다
+        TEST_FLAG.write_text("on", encoding="utf-8")
+    elif TEST_FLAG.exists():
+        TEST_FLAG.unlink()
 
 
 def workspace() -> Path:
     ws = os.getenv("RA_WORKSPACE")
     if ws and ws != "real":
         return Path(ws)
+    if test_on():
+        return TEST
     return DEMO if demo_on() else REAL
 
 

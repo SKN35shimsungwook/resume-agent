@@ -7,13 +7,18 @@ from core.extract import extract_cards
 from core.knowledge import GROUPS, SUBROLE_LABELS
 from core.paths import workspace
 from core.loaders import load_file, load_url
-from core.profile import CARD_KINDS, ExperienceCard, load_profile, save_profile
+from datetime import datetime
+
+from core.profile import CARD_KINDS, ExperienceCard, add_answer, is_duplicate, load_profile, save_profile
 
 # 체험 모드를 켜고 끌 때 다른 폴더의 데이터를 들고 있지 않도록, 작업 폴더가 바뀌면 다시 읽는다
 if st.session_state.get("profile_ws") != str(workspace()):
     st.session_state.profile = load_profile()
     st.session_state.profile_ws = str(workspace())
 profile = st.session_state.profile
+# 이 기능 전에 만든 프로필: 카드가 있으면 올려 둔 자료는 이미 정리한 것으로 본다 (다시 읽어 겹치지 않게)
+if profile.cards and profile.raw_documents and not profile.processed_docs:
+    profile.processed_docs = list(profile.raw_documents)
 
 ui.back_link()
 st.markdown("## 🗂️ 내 경험 정리")
@@ -32,7 +37,11 @@ with st.container(border=True, key="card_upload"):
     url = st.text_input(
         "웹페이지 링크", placeholder="포트폴리오·GitHub·노션 주소 (선택)"
     )
+    quick = st.text_area("새 활동 직접 적기 (선택: 이번 주 만든 프로그램·팀플을 자유롭게)", height=90,
+                         placeholder="예) 11/3 팀플 — LangGraph로 자소서 검증 에이전트, 내 역할: 평가 화면·시험 30건, 결과: 인사 점수 58→78점")
     if st.button("텍스트 추출", width="stretch"):
+        if quick.strip():
+            profile.raw_documents[f"직접 입력 {datetime.now():%Y-%m-%d %H:%M}"] = quick.strip()
         for f in files or []:
             try:
                 profile.raw_documents[f.name] = load_file(f.name, f.getvalue())
@@ -46,35 +55,63 @@ with st.container(border=True, key="card_upload"):
 
     for name, text in list(profile.raw_documents.items()):
         c1, c2 = st.columns([10, 1], vertical_alignment="center")
-        with c1.expander(f"📄 {name} · {len(text):,}자"):
+        done = "✅ 카드로 정리됨" if name in profile.processed_docs else "🆕 아직 안 정리됨"
+        with c1.expander(f"📄 {name} · {len(text):,}자 · {done}"):
             st.text(text[:3000] + ("…" if len(text) > 3000 else ""))
         if c2.button("✕", key=f"rm_{name}", help="이 자료 빼기"):
             del profile.raw_documents[name]
+            if name in profile.processed_docs:
+                profile.processed_docs.remove(name)
             st.rerun()
 
-    if profile.raw_documents:
-        st.success("자료를 읽었어요. 'AI로 경험 카드 만들기'를 눌러 주세요.")
+    # 매주 새 활동을 더할 때 예전 자료를 다시 읽으면 카드가 겹쳐 쌓여서, 아직 안 정리한 자료만 읽는다
+    new_docs = {n: t for n, t in profile.raw_documents.items() if n not in profile.processed_docs}
+    if new_docs:
+        st.success(f"새 자료 {len(new_docs)}개가 있어요. 'AI로 경험 카드 만들기'를 누르면 이것만 읽어요 (호출 1번쯤).")
         if st.button("✨ AI로 경험 카드 만들기", type="primary", width="stretch"):
-            with st.spinner("자료를 읽고 경험을 나누는 중..."):
+            with st.spinner("새 자료를 읽고 경험을 나누는 중..."):
                 try:
-                    new_cards, questions = extract_cards(profile.raw_documents)
-                    profile.cards.extend(new_cards)
-                    st.session_state.missing_questions = questions
+                    new_cards, questions = extract_cards(new_docs, [c.title for c in profile.cards])
+                    added = [c for c in new_cards if not is_duplicate(profile, c)]
+                    profile.cards.extend(added)
+                    profile.processed_docs += list(new_docs)
+                    titles = {c.title: c.id for c in profile.cards}
+                    profile.open_questions += [{"card_id": titles.get(q.get("card", ""), ""), "card": q.get("card", ""),
+                                                "question": q.get("question", "")} for q in questions if q.get("question")]
+                    save_profile(profile)  # 정리 결과를 바로 저장한다 (새로고침해도 남게)
+                    st.toast(f"새 카드 {len(added)}장 · 이미 있는 경험이라 건너뜀 {len(new_cards) - len(added)}장 · "
+                             f"보완 질문 {len(questions)}개", icon="✅")
                     st.rerun()
                 except Exception as e:
                     st.error(f"만들지 못했어요: {e}")
+    elif profile.raw_documents:
+        st.caption("올린 자료는 모두 카드로 정리했어요. 새 활동이 생기면 위에 적거나 파일을 올려 주세요.")
 
 # ── 2. 경험 카드 ──────────────────────────────────────────
 with st.container(border=True, key="card_cards"):
-    questions = st.session_state.get("missing_questions", [])
+    questions = profile.open_questions
     ui.tiles([
         ("올린 자료", f"{len(profile.raw_documents)}개"),
         ("경험 카드", f"{len(profile.cards)}개"),
         ("수치 있는 카드", f"{sum(1 for c in profile.cards if c.metrics)}개"),
         ("보완 질문", f"{len(questions)}개"),
     ])
-    for q in questions:
-        st.info(f"**{q.get('card', '')}** — {q.get('question', '')}")
+    if questions:
+        st.markdown("**보완 질문** — 답하면 해당 경험 카드에 덧붙여 저장돼요. 자소서에 쓸 수 있는 사실이 늘어나요.")
+    for j, q in enumerate(list(questions)):
+        with st.container(border=True):
+            st.markdown(f"**{q.get('card', '') or '기타'}** — {q.get('question', '')}")
+            c1, c2, c3 = st.columns([6, 1, 1], vertical_alignment="bottom")
+            reply = c1.text_input("답", key=f"oq_{j}", label_visibility="collapsed", placeholder="사실만 짧게 적어 주세요")
+            if c2.button("저장", key=f"oqs_{j}", disabled=not reply):
+                add_answer(profile, q.get("question", ""), reply, q.get("card_id", ""), q.get("card", ""))
+                profile.open_questions.pop(j)
+                save_profile(profile)
+                st.rerun()
+            if c3.button("넘기기", key=f"oqx_{j}", help="이 질문은 답하지 않고 지워요"):
+                profile.open_questions.pop(j)
+                save_profile(profile)
+                st.rerun()
 
     with st.expander("기본 인적사항", expanded=not profile.name):
         c1, c2, c3 = st.columns(3)

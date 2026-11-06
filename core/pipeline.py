@@ -14,11 +14,12 @@
 import hashlib
 import json
 import re
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from .checks import (ground_info, grounding_violations, length_target, length_violations, novel_sentences,
-                     repeated_sentences, run_checks)
+from .checks import (fact_report, grounding_violations, length_target, length_violations, merge_info,
+                     novel_sentences, repeated_sentences, run_checks)
 from .knowledge import GROUPS
 from .llm import ask_json, load_config
 from .profile import cards_as_context, load_profile
@@ -30,7 +31,9 @@ REVISE_2_BELOW = 70  # 인사담당자 점수가 이보다 낮으면 한 번 더
 PRECISE_ROUNDS = ["v1_fact", "v2_structure", "v3_fit", "v4_style", "v5_consistency"]
 ESSAY_STEPS = {"draft", "checks", "verify_a", "verify_b", "revise", "revise_2", "final_check", *PRECISE_ROUNDS,
                *[f"revise_{r}" for r in PRECISE_ROUNDS]}
-APPLY_STATUSES = ["준비", "제출", "서류 합격", "서류 탈락", "면접", "최종 합격", "포기"]
+# 탈락은 단계마다 따로 둔다 (어디서 떨어졌는지 나중에 모아 보려고)
+APPLY_STATUSES = ["준비", "제출", "서류 합격", "서류 탈락", "인적성·과제", "인적성·과제 탈락", "면접", "면접 탈락",
+                  "최종 합격", "최종 탈락", "포기"]
 
 
 class WaitForApproval(Exception):
@@ -206,6 +209,158 @@ def apply_hr_feedback(rid: str, config: dict | None = None) -> dict:
     return state
 
 
+# ── 단계 함수 ────────────────────────────────────────────────
+# 단계마다 (state, ctx)를 받아 state를 고친다. LLM 호출은 모두 ask_json 하나를 거친다.
+# 같은 입력이면 같은 경로로 가고, 단계 하나만 따로 시험하거나 나중에 그래프 노드로 감쌀 수 있다.
+SCHEMA_VERSION = 2  # state.json 형식 버전 (형식이 바뀌면 올린다)
+
+
+@dataclass
+class Ctx:
+    profile: object
+    cards_text: str
+    config: dict
+    rid: str
+
+
+def _subrole(state: dict) -> str:
+    return state["analysis"]["subrole"]
+
+
+def step_analyze(state: dict, ctx: Ctx) -> dict:
+    titles = "\n".join(f"- [{c.id}] {c.kind} · {c.title} ({c.period})" for c in ctx.profile.cards)
+    analysis = ask_json("writer", build_analyzer_prompt(),
+                        f"## 공고 원문\n{state['posting'][:30000]}\n\n## 지원자 경험 요약 (적합도용)\n{titles}",
+                        config=ctx.config, temperature=0.2, step="analyze")
+    valid = {s for subs in GROUPS.values() for s in subs}
+    if analysis.get("subrole") not in valid:  # 목록 밖 id면 내 희망 직무 첫 번째로
+        analysis["subrole_why"] = (f"(분석 결과 '{analysis.get('subrole')}'가 목록에 없어 기본값 사용) "
+                                   + str(analysis.get("subrole_why", "")))
+        analysis["subrole"] = (ctx.profile.target_roles or ["ax_external"])[0]
+    analysis["info"] = merge_info(analysis.get("info") or {}, state["posting"])
+    state["analysis"] = analysis
+    return state
+
+
+def step_research(state: dict, ctx: Ctx) -> dict:
+    if ctx.config.get("research", True):
+        state["research"] = research(state["analysis"], state["posting"], state.get("extra_urls"), ctx.config,
+                                     extra_text=state.get("extra_text", ""))
+    return state
+
+
+def step_draft(state: dict, ctx: Ctx) -> dict:
+    state["draft"] = ask_json("writer", build_system_prompt("drafter", _subrole(state)),
+                              _payload(state, ctx.cards_text), config=ctx.config, step="draft")
+    _snapshot(state, "초안")
+    return state
+
+
+def step_checks(state: dict, ctx: Ctx) -> dict:
+    others = _other_runs(ctx.rid)
+    state["code_violations"] = run_checks(
+        state["analysis"], {"answers": current_answers(state)}, ctx.profile.cards, ctx.cards_text,
+        [r.get("analysis", {}).get("company", "") for r in others],
+        [a.get("text", "") for r in others for a in current_answers(r)])
+    return state
+
+
+def step_verify(kind: str):
+    def _go(state: dict, ctx: Ctx) -> dict:
+        result = ask_json("judge", build_system_prompt(kind, _subrole(state)),
+                          _payload(state, ctx.cards_text, current_answers(state)), config=ctx.config, step=kind)
+        if kind == "verify_a":  # 사실성은 근거 문구를 코드가 원문과 글자 그대로 대조해서 판정한다
+            found, score = grounding_violations(result.get("claims", []), ctx.cards_text + "\n" + state["posting"])
+            result["violations"] = found + result.get("violations", [])
+            result["score"] = score
+        state[kind] = result
+        return state
+    return _go
+
+
+def revise_with(state: dict, ctx: Ctx, found: list, label: str) -> dict:
+    """위반 목록만 고친다. 위반이 없으면 호출하지 않는다."""
+    if not found:
+        return state
+    before = {a.get("question", ""): len(a.get("text", "")) for a in current_answers(state)}
+    extra = f"## 고칠 것 (이것만 고친다)\n{json.dumps(found, ensure_ascii=False)}"
+    state["final"] = ask_json("writer", build_system_prompt("reviser", _subrole(state)),
+                              _payload(state, ctx.cards_text, current_answers(state), extra),
+                              config=ctx.config, temperature=0.4, step=label)
+    # 수정 모델이 문장을 고치지 않고 지워서 글이 줄어드는 일이 많았다 (30명 시험 평균 -31%).
+    # 15% 넘게 줄었거나 분량·제한을 못 맞추거나 같은 문장을 되풀이하면 한 번만 더 고친다.
+    again = length_violations(state["analysis"], current_answers(state)) + repeated_sentences(current_answers(state))
+    for a in current_answers(state):
+        old = before.get(a.get("question", ""), 0)
+        if old and len(a.get("text", "")) < old * 0.85 and not any(v["question"] == a.get("question") for v in again):
+            again.append({"rule": "FC-4", "question": a.get("question", ""), "sentence": "",
+                          "why": f"수정 전 {old}자에서 {len(a.get('text', ''))}자로 줄었다. 지운 자리를 카드 사실로 다시 채운다."})
+    if again:
+        first = state["final"].get("changes", [])
+        state["final"] = ask_json("writer", build_system_prompt("reviser", _subrole(state)),
+                                  _payload(state, ctx.cards_text, current_answers(state),
+                                           f"## 고칠 것 (분량·반복만 맞춘다)\n{json.dumps(again, ensure_ascii=False)}"),
+                                  config=ctx.config, temperature=0.4, step=f"{label}_length")
+        state["final"]["changes"] = first + state["final"].get("changes", [])
+    state.setdefault("revisions", []).append({"after": label, "changes": state["final"].get("changes", [])})
+    _snapshot(state, label)
+    return state
+
+
+def step_revise(state: dict, ctx: Ctx) -> dict:
+    found = (state.get("code_violations", []) + state.get("verify_a", {}).get("violations", [])
+             + state.get("verify_b", {}).get("violations", []))
+    return revise_with(state, ctx, found, "revise")
+
+
+def step_revise_round(r: str):
+    def _go(state: dict, ctx: Ctx) -> dict:
+        found = state.get(r, {}).get("violations", []) + (state.get("code_violations", []) if r == "v1_fact" else [])
+        return revise_with(state, ctx, found, f"revise_{r}")
+    return _go
+
+
+def step_resume(state: dict, ctx: Ctx) -> dict:
+    base = base_resume(_subrole(state))
+    extra = (f"## 기본 이력서 (순서·강조만 이 공고에 맞게 고친다)\n{json.dumps(base, ensure_ascii=False)}"
+             if base else "## 기본 이력서 없음 — 경험 카드로 이 공고용 이력서를 새로 만든다.")
+    extra += ("\n\n## 이력서 규칙\n- 이력서만 만든다. 자기소개서 답변이나 문항을 이력서 안에 넣지 않는다.\n"
+              "- 항목은 짧은 사실 문장으로 쓰고, 카드에 없는 결과(복구했다, 안정화했다 등)를 붙이지 않는다.")
+    state["resume"] = ask_json("writer", build_system_prompt("resume", _subrole(state)),
+                               _payload(state, ctx.cards_text, extra=extra), config=ctx.config,
+                               temperature=0.3, step="resume")
+    return state
+
+
+def step_hr(state: dict, ctx: Ctx) -> dict:
+    state["hr"] = ask_json("judge", build_system_prompt("judge", _subrole(state)),
+                           _payload(state, ctx.cards_text, current_answers(state)), config=ctx.config, step="hr")
+    return state
+
+
+def step_revise_2(state: dict, ctx: Ctx) -> dict:
+    if (state["hr"].get("total") or 0) >= REVISE_2_BELOW:
+        return state
+    found = state["hr"].get("violations", []) + [{"rule": "HR", "why": r} for r in state["hr"].get("reasons", [])]
+    return revise_with(state, ctx, found, "revise_2")
+
+
+def step_final_check(state: dict, ctx: Ctx) -> dict:
+    """최종본 코드 검사 (호출 0번). 남은 의심 문장은 화면에 표시해 사람이 확인하고, 사실 지표를 남긴다."""
+    state["final_check"] = novel_sentences(current_answers(state), ctx.cards_text + "\n" + state["posting"])
+    state["fact_report"] = fact_report(state, ctx.profile.cards)
+    return state
+
+
+STEP_FUNCS = {
+    "analyze": step_analyze, "research": step_research, "draft": step_draft, "checks": step_checks,
+    "verify_a": step_verify("verify_a"), "verify_b": step_verify("verify_b"), "revise": step_revise,
+    "resume": step_resume, "hr": step_hr, "revise_2": step_revise_2, "final_check": step_final_check,
+    **{r: step_verify(r) for r in PRECISE_ROUNDS}, **{f"revise_{r}": step_revise_round(r) for r in PRECISE_ROUNDS},
+}
+GATES = {"verify_b", *PRECISE_ROUNDS}  # '회차마다 확인'을 켜면 여기서 멈춘다
+
+
 def run(posting_text: str, on_step=None, config: dict | None = None, mode: str | None = None,
         extra_urls: list[str] | None = None, stop_after: str | None = None,
         source_url: str = "", extra_text: str = "") -> dict:
@@ -214,6 +369,7 @@ def run(posting_text: str, on_step=None, config: dict | None = None, mode: str |
     rid = run_id(posting_text)
     state = load_state(rid) or {"id": rid, "created": datetime.now().isoformat(timespec="seconds"),
                                 "posting": posting_text, "done": [], "apply_status": "준비"}
+    state["schema"] = SCHEMA_VERSION
     state["mode"] = mode or state.get("mode") or "normal"
     if extra_urls:
         state["extra_urls"] = extra_urls
@@ -224,147 +380,29 @@ def run(posting_text: str, on_step=None, config: dict | None = None, mode: str |
     profile = load_profile()
     if not profile.cards:
         raise ValueError("경험 카드가 없습니다. '내 경험 정리'에서 먼저 카드를 만들어 주세요.")
-    cards_text = cards_as_context(profile)
-    subrole = lambda: state["analysis"]["subrole"]  # noqa: E731
-
-    def is_resume_only() -> bool:
-        return state.get("analysis", {}).get("format") == "resume_only"
-
-    def step(name, fn, gate: bool = False):
-        if name in state["done"]:
-            return
-        if name in ESSAY_STEPS and is_resume_only():
-            state["done"].append(name)  # 이력서만 받는 공고는 자소서 단계를 건너뛴다
-            return
-        if on_step:
-            on_step(name, state)
-        fn()
-        state["done"].append(name)
-        save_state(rid, state)
-        if gate and config.get("confirm_each_round") and name not in state.get("approvals", []):
-            state["status"], state["waiting_at"] = "waiting", name
-            raise WaitForApproval(name)
-
-    def analyze():
-        titles = "\n".join(f"- [{c.id}] {c.kind} · {c.title} ({c.period})" for c in profile.cards)
-        analysis = ask_json("writer", build_analyzer_prompt(),
-                            f"## 공고 원문\n{posting_text[:30000]}\n\n## 지원자 경험 요약 (적합도용)\n{titles}",
-                            config=config, temperature=0.2, step="analyze")
-        valid = {s for subs in GROUPS.values() for s in subs}
-        if analysis.get("subrole") not in valid:  # 목록 밖 id면 내 희망 직무 첫 번째로
-            analysis["subrole_why"] = (f"(분석 결과 '{analysis.get('subrole')}'가 목록에 없어 기본값 사용) "
-                                       + str(analysis.get("subrole_why", "")))
-            analysis["subrole"] = (profile.target_roles or ["ax_external"])[0]
-        analysis["info"] = ground_info(analysis.get("info") or {}, posting_text)
-        state["analysis"] = analysis
-
-    def do_research():
-        if config.get("research", True):
-            state["research"] = research(state["analysis"], posting_text, state.get("extra_urls"), config,
-                                         extra_text=state.get("extra_text", ""))
-
-    def draft():
-        state["draft"] = ask_json("writer", build_system_prompt("drafter", subrole()),
-                                  _payload(state, cards_text), config=config, step="draft")
-        _snapshot(state, "초안")
-
-    def checks():
-        others = _other_runs(rid)
-        state["code_violations"] = run_checks(
-            state["analysis"], {"answers": current_answers(state)}, profile.cards, cards_text,
-            [r.get("analysis", {}).get("company", "") for r in others],
-            [a.get("text", "") for r in others for a in current_answers(r)])
-
-    def verify(kind):
-        def _go():
-            result = ask_json("judge", build_system_prompt(kind, subrole()),
-                              _payload(state, cards_text, current_answers(state)), config=config, step=kind)
-            if kind == "verify_a":  # 사실성은 근거 문구를 코드가 원문과 글자 그대로 대조해서 판정한다
-                found, score = grounding_violations(result.get("claims", []), cards_text + "\n" + state["posting"])
-                result["violations"] = found + result.get("violations", [])
-                result["score"] = score
-            state[kind] = result
-        return _go
-
-    def revise(found_fn, label):
-        def _go():
-            found = found_fn()
-            if not found:
-                return  # 위반이 없으면 호출하지 않는다
-            before = {a.get("question", ""): len(a.get("text", "")) for a in current_answers(state)}
-            extra = f"## 고칠 것 (이것만 고친다)\n{json.dumps(found, ensure_ascii=False)}"
-            state["final"] = ask_json("writer", build_system_prompt("reviser", subrole()),
-                                      _payload(state, cards_text, current_answers(state), extra),
-                                      config=config, temperature=0.4, step=label)
-            # 수정 모델이 문장을 고치지 않고 지워서 글이 줄어드는 일이 많았다 (30명 시험 평균 -31%).
-            # 15% 넘게 줄었거나 분량·제한을 못 맞추면 한 번만 더 고친다.
-            again = length_violations(state["analysis"], current_answers(state)) + repeated_sentences(current_answers(state))
-            for a in current_answers(state):
-                old = before.get(a.get("question", ""), 0)
-                if old and len(a.get("text", "")) < old * 0.85 and not any(v["question"] == a.get("question") for v in again):
-                    again.append({"rule": "FC-4", "question": a.get("question", ""), "sentence": "",
-                                  "why": f"수정 전 {old}자에서 {len(a.get('text', ''))}자로 줄었다. 지운 자리를 카드 사실로 다시 채운다."})
-            if again:
-                first = state["final"].get("changes", [])
-                state["final"] = ask_json("writer", build_system_prompt("reviser", subrole()),
-                                          _payload(state, cards_text, current_answers(state),
-                                                   f"## 고칠 것 (분량만 맞춘다)\n{json.dumps(again, ensure_ascii=False)}"),
-                                          config=config, temperature=0.4, step=f"{label}_length")
-                state["final"]["changes"] = first + state["final"].get("changes", [])
-            state.setdefault("revisions", []).append({"after": label, "changes": state["final"].get("changes", [])})
-            _snapshot(state, label)
-        return _go
-
-    def normal_violations():
-        return (state.get("code_violations", []) + state.get("verify_a", {}).get("violations", [])
-                + state.get("verify_b", {}).get("violations", []))
-
-    def tailored_resume():
-        base = base_resume(subrole())
-        extra = (f"## 기본 이력서 (순서·강조만 이 공고에 맞게 고친다)\n{json.dumps(base, ensure_ascii=False)}"
-                 if base else "## 기본 이력서 없음 — 경험 카드로 이 공고용 이력서를 새로 만든다.")
-        extra += ("\n\n## 이력서 규칙\n- 이력서만 만든다. 자기소개서 답변이나 문항을 이력서 안에 넣지 않는다.\n"
-                  "- 항목은 짧은 사실 문장으로 쓰고, 카드에 없는 결과(복구했다, 안정화했다 등)를 붙이지 않는다.")
-        state["resume"] = ask_json("writer", build_system_prompt("resume", subrole()),
-                                   _payload(state, cards_text, extra=extra), config=config,
-                                   temperature=0.3, step="resume")
-
-    def hr():
-        state["hr"] = ask_json("judge", build_system_prompt("judge", subrole()),
-                               _payload(state, cards_text, current_answers(state)), config=config, step="hr")
-
-    def revise_2():
-        if (state["hr"].get("total") or 0) < REVISE_2_BELOW:
-            revise(lambda: state["hr"].get("violations", []) + [{"rule": "HR", "why": r} for r in state["hr"].get("reasons", [])],
-                   "revise_2")()
+    ctx = Ctx(profile=profile, cards_text=cards_as_context(profile), config=config, rid=rid)
 
     state["status"] = "running"
     state.pop("error", None)
     try:
-        step("analyze", analyze)
-        if stop_after == "analyze":
-            state["status"] = "screened"
+        for name in steps_for(state["mode"]):
+            if name in state["done"]:
+                continue
+            if name in ESSAY_STEPS and state.get("analysis", {}).get("format") == "resume_only":
+                state["done"].append(name)  # 이력서만 받는 공고는 자소서 단계를 건너뛴다
+                continue
+            if on_step:
+                on_step(name, state)
+            state = STEP_FUNCS[name](state, ctx)
+            state["done"].append(name)
             save_state(rid, state)
-            return state
-        step("research", do_research)
-        step("draft", draft)
-        step("checks", checks)
-        if state["mode"] == "precise":
-            for r in PRECISE_ROUNDS:
-                step(r, verify(r), gate=True)
-                step(f"revise_{r}", revise(lambda r=r: state.get(r, {}).get("violations", [])
-                                           + (state.get("code_violations", []) if r == "v1_fact" else []),
-                                           f"revise_{r}"))
-        else:
-            step("verify_a", verify("verify_a"))
-            step("verify_b", verify("verify_b"), gate=True)
-            step("revise", revise(normal_violations, "revise"))
-        step("resume", tailored_resume)
-        step("hr", hr)
-        step("revise_2", revise_2)
-        # 최종본에 한 번 더 코드 검사 (호출 0번). 남은 의심 문장은 화면에 표시해 사람이 확인한다.
-        step("final_check", lambda: state.__setitem__(
-            "final_check", novel_sentences(current_answers(state), cards_text + "\n" + state["posting"])))
+            if name == "analyze" and stop_after == "analyze":
+                state["status"] = "screened"
+                save_state(rid, state)
+                return state
+            if name in GATES and config.get("confirm_each_round") and name not in state.get("approvals", []):
+                state["status"], state["waiting_at"] = "waiting", name
+                raise WaitForApproval(name)
         state["status"] = "done"
         state.pop("waiting_at", None)
     except WaitForApproval:

@@ -20,6 +20,7 @@ metrics, learned, skills(문자열 배열), evidence(링크 배열).
 그리고 카드를 더 좋게 만들려면 사용자에게 물어봐야 할 것(예: 성과 수치, 내 역할 비중)을
 missing_questions 배열에 카드 title과 함께 적어줘.
 
+{existing}
 응답 형식:
 {{"cards": [...], "missing_questions": [{{"card": "...", "question": "..."}}]}}
 
@@ -46,12 +47,15 @@ def _chunks(documents: dict) -> list[str]:
     return parts
 
 
-def extract_cards(documents: dict) -> tuple[list[ExperienceCard], list[dict]]:
+def extract_cards(documents: dict, existing_titles: list[str] | None = None) -> tuple[list[ExperienceCard], list[dict]]:
+    """existing_titles: 이미 있는 카드 제목. 매주 새 프로젝트만 추가할 때 같은 경험을 또 만들지 않게 알려 준다."""
     fields = ExperienceCard.__dataclass_fields__
     cards, questions, seen = [], [], set()
+    existing = ("이미 정리된 경험(같은 경험이면 카드를 다시 만들지 말 것): " + ", ".join(existing_titles) + "\n"
+                if existing_titles else "")
     for chunk in _chunks(documents):
         # 추출은 창작이 아니라 옮겨 적기라서 온도를 낮춘다.
-        data = ask_json("writer", SYSTEM, PROMPT.format(kinds=", ".join(CARD_KINDS), documents=chunk),
+        data = ask_json("writer", SYSTEM, PROMPT.format(kinds=", ".join(CARD_KINDS), documents=chunk, existing=existing),
                         temperature=0.2, step="extract")
         for raw in data.get("cards", []):
             clean = {k: v for k, v in raw.items() if k in fields and k != "id"}

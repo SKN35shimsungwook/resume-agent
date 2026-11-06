@@ -8,6 +8,7 @@ config = load_config()
 ui.back_link()
 st.markdown("## ⚙️ 설정")
 st.caption("API 키와 설정은 data/config.json에만 저장되고, 깃에는 올라가지 않아요.")
+st.page_link("views/admin.py", label="관리자 메뉴 (시험 데이터 켜고 끄기)", icon=":material/admin_panel_settings:")
 
 with st.container(border=True, key="card_api"):
     st.markdown("**API 키**")

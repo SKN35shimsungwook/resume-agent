@@ -71,3 +71,4 @@ if profile.cards:
 else:
     left.caption("처음이라면 '내 경험 정리'부터 시작하고, API 키는 설정에서 넣어 주세요.")
 right.page_link("views/settings.py", label="설정", icon=":material/settings:")
+right.page_link("views/admin.py", label="관리자", icon=":material/admin_panel_settings:")

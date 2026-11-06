@@ -10,6 +10,7 @@ pages = st.navigation(
         st.Page("views/guide.py", title="하나씩 따라하기"),
         st.Page("views/profile.py", title="내 경험 정리"),
         st.Page("views/settings.py", title="설정"),
+        st.Page("views/admin.py", title="관리자"),
         st.Page("views/write.py", title="회사 맞춤 작성"),
         st.Page("views/applications.py", title="내 지원 현황"),
         st.Page("views/review.py", title="인사담당자 첨삭"),

@@ -6,8 +6,8 @@ from pathlib import Path
 
 import streamlit as st
 
-from core import db, ui
-from core.pipeline import APPLY_STATUSES
+from core import archive, db, tracking, ui
+from core.pipeline import APPLY_STATUSES, load_state
 
 ui.back_link()
 st.markdown("## 📋 내 지원 현황")
@@ -30,6 +30,18 @@ ui.tiles([
     ("전체 제출", f"{len(submitted)}건"),
     ("마감 3일 안 (미제출)", f"{len(soon)}건"),
 ])
+
+# ── 다가오는 일정 (발표·시험·면접) ──────────────────────────
+events = tracking.upcoming([load_state(r["run_id"]) for r in rows])
+passed = sum(r["status"] in ("서류 합격", "인적성·과제", "면접", "최종 합격") for r in rows)
+failed = sum("탈락" in (r["status"] or "") for r in rows)
+with st.container(border=True, key="card_events"):
+    st.markdown(f"**📅 다가오는 일정 (2주 안)** · 진행 중 {passed}건 · 탈락 {failed}건")
+    if events:
+        for e in events:
+            st.markdown(f"- **{'오늘' if e['d'] == 0 else f'D-{e['d']}'}** {e['date']} · {e['what']} · {e['company']} ({e['position'][:20]})")
+    else:
+        st.caption("등록된 일정이 없어요. 아래 '자세히 보기'에서 발표일·면접일을 넣으면 여기에 모여요.")
 
 with st.container(border=True, key="card_filter"):
     c1, c2, c3 = st.columns([2, 2, 3])
@@ -77,8 +89,47 @@ labels = {f"{t['지원일']} · {r['company']} · {r['position']}": r for t, r i
 if labels:
     pick = labels[st.selectbox("공고 고르기", list(labels), label_visibility="collapsed")]
     with st.container(border=True, key="card_detail"):
+        rid = pick["run_id"]
         ui.tiles([("상태", pick["status"]), ("점수", f"{pick['hr_total'] or '-'}"), ("적합도", f"{pick['fit'] or '-'}"),
                   ("마감", d_day(pick) or pick["deadline"] or "-")])
+        cur = pick["status"] if pick["status"] in APPLY_STATUSES else "준비"
+        new_status = st.selectbox("지원 상태 바꾸기", APPLY_STATUSES, index=APPLY_STATUSES.index(cur), key=f"ap_st_{rid}",
+                                  help="처음 '제출'로 바꾼 날이 지원일이 되고, 보관 PDF에도 상태가 반영돼요.")
+        if new_status != cur:
+            archive.set_status(rid, new_status)
+            st.rerun()
+
+        # 일정·체크리스트·메모
+        tr = tracking.get(load_state(rid))
+        st.markdown("**📅 일정**")
+        cols = st.columns(len(tracking.DATE_LABELS))
+        dates = {}
+        for col, label in zip(cols, tracking.DATE_LABELS):
+            old = tr["dates"].get(label)
+            value = col.date_input(label, value=date.fromisoformat(old) if old else None, key=f"dt_{rid}_{label}",
+                                   format="YYYY-MM-DD")
+            dates[label] = value.isoformat() if value else ""
+        st.markdown("**✅ 할 일**")
+        todo = []
+        for i, item in enumerate(tr["todo"]):
+            c1, c2 = st.columns([12, 1], vertical_alignment="center")
+            done = c1.checkbox(item["text"], value=item.get("done", False), key=f"td_{rid}_{i}")
+            if not c2.button("✕", key=f"tdx_{rid}_{i}", help="이 할 일 지우기"):
+                todo.append({"text": item["text"], "done": done})
+        new_item = st.text_input("할 일 추가", key=f"tdn_{rid}", placeholder="예: 포트폴리오 PDF 따로 제출")
+        if new_item.strip():
+            todo.append({"text": new_item.strip(), "done": False})
+        memo = st.text_area("메모 (면접 후기·받은 질문·연락 담당자 등)", tr["memo"], key=f"memo_{rid}", height=90)
+        changed = {"dates": dates, "todo": todo, "memo": memo} != tr
+        if st.button("💾 일정·할 일·메모 저장", type="primary" if changed else "secondary", key=f"trs_{rid}"):
+            tracking.save(rid, {"dates": dates, "todo": todo, "memo": memo})
+            for k in [k for k in st.session_state if str(k).startswith(("td_", "tdx_", "tdn_"))]:
+                del st.session_state[k]
+            st.toast("저장했어요.", icon="✅")
+            st.rerun()
+        done_n = sum(t["done"] for t in todo)
+        st.caption(f"할 일 {done_n}/{len(todo)} 완료" + (" · 저장 안 한 변경이 있어요" if changed else ""))
+        st.divider()
         st.markdown(f"**근무 조건** — 고용: {pick['employment'] or '-'} · 급여: {pick['salary'] or '공고에 없음'} · "
                     f"근무지: {pick['location'] or '-'} · 근무 시간: {pick['hours'] or '-'}  \n"
                     f"복지: {pick['benefits'] or '-'} · 모집 인원: {pick['headcount'] or '-'}")

@@ -106,6 +106,7 @@ def run_checks(analysis: dict, draft: dict, cards: list, cards_text: str, other_
             violations.append({"rule": "FC-4", "question": q, "sentence": "", "why": "이 문항의 답변이 없다."})
 
     violations += length_violations(analysis, answers) + repeated_sentences(answers)
+    violations += sentence_violations(answers, cards, json.dumps(analysis, ensure_ascii=False))
     main_cards = {}
     for a in answers:
         q, text = a.get("question", ""), a.get("text", "")
@@ -124,7 +125,7 @@ def run_checks(analysis: dict, draft: dict, cards: list, cards_text: str, other_
             used.update(i for i in ids if i in card_ids)
         if used:
             main_cards[q] = used.most_common(1)[0][0]
-        # FA-2: 카드에 없는 숫자
+        # FA-2: 카드 어디에도 없는 숫자 (문장별 근거가 없을 때의 안전망. 문장 기준 검사는 sentence_violations)
         for n in sorted(_numbers(text) - allowed_numbers):
             if len(n) >= 2 or n not in "0123456789":  # 한 자리 순서 숫자(1, 2…)는 넘어간다
                 violations.append({"rule": "FA-2", "question": q, "sentence": n,
@@ -251,3 +252,110 @@ def ground_info(info: dict, posting_text: str) -> dict:
         else:
             out[key] = {"value": value, "quote": quote}
     return out
+
+
+def site_info(posting_text: str) -> dict:
+    """채용 사이트의 고정 칸(접수기간·채용형태·급여·근무지역)을 코드로 읽는다 (호출 0번).
+
+    링커리어는 '칸 이름' 다음 줄에 값이 오고, 하이잡은 '접수 기간: 시작 ~ 끝' 한 줄이다.
+    AI가 놓친 칸을 채우는 보조용이라, AI가 이미 근거와 함께 채운 칸은 건드리지 않는다.
+    """
+    lines = [l.strip() for l in posting_text.splitlines() if l.strip()]
+    out = {}
+
+    def after(label: str, n: int = 1) -> str:
+        if label in lines:
+            i = lines.index(label)
+            return lines[i + n] if i + n < len(lines) else ""
+        return ""
+
+    def iso(y: str, m: str, d: str) -> str:
+        return f"{int(y):04d}-{int(m):02d}-{int(d):02d}"
+
+    # 링커리어: 접수기간 / 시작 / ~ / 끝
+    if after("접수기간", 2) == "~" and (m := re.match(r"(\d{4})\.(\d{1,2})\.(\d{1,2})", after("접수기간", 3))):
+        out["deadline"] = {"value": iso(*m.groups()), "quote": after("접수기간", 3)}
+    # 하이잡: 접수 기간: 2026.08.31. 오전12:00 ~ 09.14. 오후11:59
+    for l in lines:
+        if l.startswith("접수 기간") and "deadline" not in out:
+            m = re.search(r"(\d{4})\.(\d{1,2})\.(\d{1,2}).*?~\s*(?:(\d{4})\.)?(\d{1,2})\.(\d{1,2})", l)
+            if m:
+                y = m.group(4) or m.group(1)
+                out["deadline"] = {"value": iso(y, m.group(5), m.group(6)), "quote": l}
+    for key, label in (("employment", "채용형태"), ("salary", "급여"), ("location", "근무지역")):
+        if value := after(label):
+            out[key] = {"value": value, "quote": f"{label} {value}"}
+    return out
+
+
+def merge_info(info: dict, posting_text: str) -> dict:
+    """AI가 뽑은 근무 조건(근거 대조 후)에 사이트 고정 칸으로 빈 곳을 채운다."""
+    info = ground_info(info or {}, posting_text)
+    for key, item in site_info(posting_text).items():
+        if not info.get(key, {}).get("value"):
+            info[key] = item | {"source": "사이트 고정 칸"}
+    return info
+
+
+# ── 2단계: 문장 단위 근거 검사 (LLM 판정 없이 코드로) ─────────────────────────
+PLEDGE = re.compile(r"(겠습니다|싶습니다|하겠|되겠|이루고|기여하|목표입니다|계획입니다)")
+
+
+def _card_texts(cards: list, posting_text: str) -> dict[str, str]:
+    from .profile import cards_as_context, Profile
+    texts = {c.id: cards_as_context(Profile(cards=[c])) for c in cards}
+    texts["posting"] = posting_text
+    return texts
+
+
+def sentence_violations(answers: list, cards: list, posting_text: str) -> list[dict]:
+    """문장마다 단 근거 카드(card_ids)를 기준으로 본다.
+
+    - FA-3: 다짐·포부가 아닌데 근거 카드가 없는 문장
+    - FA-2: 문장 속 숫자가 그 문장이 근거로 단 카드(또는 공고)에 없음 — 카드 전체가 아니라 '인용한 카드' 기준
+    - FA-4: 본문(text)과 문장별 근거 목록(sentences)이 어긋남 — 근거 표시를 믿을 수 없다
+    """
+    texts = _card_texts(cards, posting_text)
+    found = []
+    for a in answers:
+        q, body = a.get("question", ""), a.get("text", "")
+        sents = a.get("sentences") or []
+        covered = sum(len(s.get("text", "")) for s in sents if s.get("text", "") and s["text"][:20] in body)
+        if body and covered < len(body) * 0.8:
+            found.append({"rule": "FA-4", "question": q, "sentence": "",
+                          "why": f"본문 {len(body)}자 중 문장별 근거가 붙은 부분이 {covered}자뿐이다. 근거 표시를 확인할 수 없다.",
+                          "fix_hint": "답변의 모든 문장을 sentences에 넣고 각 문장에 근거 카드 id를 단다."})
+        for s in sents:
+            text, ids = s.get("text", ""), [i for i in (s.get("card_ids") or []) if i in texts]
+            if not ids and not PLEDGE.search(text) and len(text) >= 15:
+                found.append({"rule": "FA-3", "question": q, "sentence": text,
+                              "why": "근거 카드가 없는 사실 문장이다.",
+                              "fix_hint": "카드에 있는 사실로 바꾸고 근거 카드 id를 달거나, 다짐 문장이면 다짐으로 쓴다."})
+                continue
+            allowed = set().union(*(_numbers(texts[i]) for i in ids)) if ids else set()
+            for n in sorted(_numbers(text) - allowed):
+                if ids and (len(n) >= 2 or n not in "0123456789"):
+                    found.append({"rule": "FA-2", "question": q, "sentence": text,
+                                  "why": f"숫자 '{n}'이 이 문장이 근거로 단 카드에 없다.",
+                                  "fix_hint": "근거 카드에 있는 숫자로 바꾸거나 숫자를 뺀다."})
+    return found
+
+
+def fact_report(state: dict, cards: list) -> dict:
+    """사실 위반 지표 (LLM 판정 없이 계산). 기준선·회귀 비교용 숫자."""
+    from .pipeline import current_answers
+    answers = current_answers(state)
+    posting = state.get("posting", "")
+    sv = sentence_violations(answers, cards, json.dumps(state.get("analysis", {}), ensure_ascii=False) + "\n" + posting)
+    from .profile import cards_as_context, Profile
+    source = cards_as_context(Profile(cards=cards)) + "\n" + posting
+    quotes, _ = grounding_violations((state.get("verify_a") or {}).get("claims", []), source)
+    count = lambda rule: sum(v["rule"] == rule for v in sv)  # noqa: E731
+    lv = length_violations(state.get("analysis", {}), answers)
+    return {
+        "sentences": sum(len(a.get("sentences") or []) for a in answers),
+        "no_card": count("FA-3"), "number_not_in_card": count("FA-2"), "evidence_mismatch": count("FA-4"),
+        "quote_not_found": len(quotes), "over_limit": sum("넘었다" in v["why"] for v in lv),
+        "too_short": sum("못 미친다" in v["why"] for v in lv), "repeated": len(repeated_sentences(answers)),
+        "novel": len(novel_sentences(answers, source)),
+    }

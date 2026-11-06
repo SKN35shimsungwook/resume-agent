@@ -55,10 +55,11 @@ CSS = """
 
 
 def page_setup() -> None:
-    from .paths import demo_on
+    from .paths import demo_on, test_on
 
     st.html(CSS)
     badge = ('<div class="ra-badge ra-badge-demo">🧪 체험 모드 · 가상 데이터</div>' if demo_on()
+             else '<div class="ra-badge ra-badge-demo">🧾 시험 데이터 보는 중 · 관리자에서 끄기</div>' if test_on()
              else '<div class="ra-badge">🔒 내 자료는 이 PC에만 저장돼요</div>')
     st.html(
         f"""
