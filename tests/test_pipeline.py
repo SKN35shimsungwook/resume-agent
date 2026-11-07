@@ -161,3 +161,35 @@ def test_lack_of_experience_as_weakness_is_flagged():
     ok = "제 단점은 혼자 해결하려다 공유가 늦어지는 점입니다."
     assert not [v for v in sentence_violations(answer(ok, [{"text": ok, "card_ids": []}])["answers"], CARDS, POSTING)
                 if v["rule"] == "WR-6"]
+
+
+def test_finish_hr_7관점_인용확인과_먼저고칠3가지():
+    """7관점 결과 후처리: 빠진 관점 채우기, 인용 대조, 먼저 고칠 3가지 채우기, 버리기 열쇠 (호출 0번)."""
+    state = {"posting": "자격요건: 전기·전자 관련 전공\n우대사항: 영어 가능자",
+             "analysis": {"must": ["전기·전자 관련 전공"], "nice": ["영어 가능자", "PLC"]},
+             "final": answer(GOOD, []),
+             "hr": {"violations": [], "top3": [],
+                    "posting_match": [{"requirement": "전기·전자 관련 전공", "kind": "자격요건", "status": "반영",
+                                       "my_quote": "없는 문장"}],
+                    "perspectives": [
+                        {"name": "성과 검토자", "result": "고칠 것 있음", "findings": [
+                            {"my_quote": "PC 제어로 로봇 티칭과 센서 점검을 했습니다", "posting_quote": "영어 가능자",
+                             "problem": "결과가 없다", "fix": "[확인 필요]분 줄였다처럼 결과를 붙인다"}]},
+                        {"name": "문장 편집자", "result": "고칠 것 있음", "findings": []},
+                        {"name": "면접관", "result": "고칠 것 없음", "findings": [
+                            {"my_quote": "지어낸 문장", "posting_quote": "", "problem": "모호", "fix": "구체화"}]}]}}
+    hr = pipeline.finish_hr(state)["hr"]
+    names = [p["name"] for p in hr["perspectives"]]
+    assert names[0] == "채용담당자" and len(names) == 7
+    by = {p["name"]: p for p in hr["perspectives"]}
+    assert by["문장 편집자"]["result"] == "고칠 것 없음"  # 지적이 없으면 고칠 것 없음
+    assert by["채용담당자"]["result"] == "결과 없음"
+    f = by["성과 검토자"]["findings"][0]
+    assert f["my_ok"] is True and f["posting_ok"] is True
+    assert by["면접관"]["findings"][0]["my_ok"] is False  # 원문에 없는 인용은 표시
+    assert len(hr["top3"]) == 2 and hr["top3"][0]["perspective"] == "성과 검토자"
+    assert any(v.get("key") == f["key"] for v in hr["violations"])  # 본문 표시·고치기에도 쓰인다
+    assert [m["requirement"] for m in hr["posting_match"] if m.get("from_analysis")] == ["영어 가능자", "PLC"]
+    assert hr["posting_match"][0]["my_ok"] is False
+    pipeline.finish_hr(state)  # 두 번 돌려도 같은 결과
+    assert len(state["hr"]["posting_match"]) == 3 and len(state["hr"]["violations"]) == 2

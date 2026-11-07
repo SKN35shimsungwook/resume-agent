@@ -18,12 +18,12 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from .checks import (fact_report, grounding_violations, length_target, length_violations, merge_info,
+from .checks import (_norm, fact_report, grounding_violations, length_target, length_violations, merge_info,
                      novel_sentences, repeated_sentences, run_checks)
 from .knowledge import GROUPS
 from .llm import ask_json, load_config
 from .profile import cards_as_context, load_profile
-from .prompts import build_analyzer_prompt, build_system_prompt
+from .prompts import HR_PERSPECTIVES, build_analyzer_prompt, build_system_prompt
 from .research import research
 
 from .paths import base_resume_dir, runs_dir
@@ -176,6 +176,102 @@ def _save_and_archive(rid: str, state: dict) -> None:
         pass  # 보관 PDF가 실패해도 첨삭 결과는 남긴다
 
 
+def _posting_block(state: dict) -> str:
+    """인사담당자는 공고 문장을 그대로 인용해야 해서 분석 요약이 아니라 공고 원문을 같이 넘긴다."""
+    return f"## 공고 원문 (posting_quote·requirement는 여기서 그대로 옮긴다)\n{state.get('posting', '')[:12000]}"
+
+
+def _quoted(quote: str, source: str) -> bool:
+    """인용 문구가 원문에 글자 그대로 있는지. 공백·문장부호 차이와 모델이 붙이는 '…'만 봐준다."""
+    q = _norm(quote.replace("…", "")).replace("/", "")
+    return bool(q) and q in source.replace("/", "")
+
+
+def finding_key(f: dict) -> str:
+    """'버리기' 체크를 같은 지적에 붙이려고 쓰는 짧은 열쇠."""
+    return hashlib.sha1(f"{f.get('my_quote', '')}|{f.get('fix', '')}".encode("utf-8")).hexdigest()[:10]
+
+
+def finish_hr(state: dict) -> dict:
+    """인사담당자 결과 후처리 (호출 0번).
+
+    - 7관점이 빠지면 '결과 없음'으로 채우고, 순서를 프롬프트의 관점 순서로 맞춘다
+    - 내 서류 문장·공고 문장 인용이 원문에 실제로 있는지 코드가 대조해 *_ok로 남긴다
+    - 먼저 고칠 3가지가 모자라면 지적 순서대로 채운다
+    - 관점 지적을 violations에도 넣어 본문 노란 표시와 '지적대로 고치기'가 그대로 돌아가게 한다
+    """
+    hr = state.get("hr") or {}
+    if "perspectives" not in hr:
+        return state  # 예전 형식 결과는 건드리지 않는다
+    mine = _norm(_answers_text(current_answers(state)) + "\n" + resume_text(state.get("resume") or {}))
+    posting = _norm(state.get("posting", ""))
+    by_name = {p.get("name", ""): p for p in hr.get("perspectives") or []}
+    ordered = []
+    for name, _ in HR_PERSPECTIVES:
+        p = by_name.get(name) or {"name": name, "result": "결과 없음", "findings": []}
+        p["findings"] = [f for f in p.get("findings") or [] if f.get("problem") or f.get("fix")]
+        if p.get("result") != "결과 없음":
+            p["result"] = "고칠 것 있음" if p["findings"] else "고칠 것 없음"
+        for f in p["findings"]:
+            f["my_ok"] = _quoted(f.get("my_quote", ""), mine)
+            f["posting_ok"] = _quoted(f.get("posting_quote", ""), posting) if f.get("posting_quote") else None
+            f["key"] = finding_key(f)
+        ordered.append(p)
+    hr["perspectives"] = ordered
+    a = state.get("analysis") or {}
+    hr["posting_match"] = [m for m in hr.get("posting_match") or [] if not m.get("from_analysis")]
+    listed = _norm(" ".join(m.get("requirement", "") for m in hr["posting_match"]))
+    for kind, items in (("자격요건", a.get("must") or []), ("우대사항", a.get("nice") or [])):
+        for item in items:  # 모델이 빠뜨린 요건도 표에 남긴다 (빠진 걸 모르는 게 더 위험하다)
+            words = [w for w in re.split(r"[\s·,/]+", item) if len(w) >= 2]
+            if words and not all(_norm(w) in listed for w in words):
+                hr.setdefault("posting_match", []).append(
+                    {"requirement": item, "kind": kind, "status": "AI가 안 봄", "my_quote": "", "from_analysis": True})
+    for m in hr.get("posting_match") or []:
+        if m.get("from_analysis"):
+            m["requirement_ok"] = None  # 분석 요약에서 온 항목이라 원문 대조를 하지 않는다
+            continue
+        m["requirement_ok"] = _quoted(m.get("requirement", ""), posting)
+        m["my_ok"] = _quoted(m.get("my_quote", ""), mine) if m.get("my_quote") else None
+
+    all_findings = [f | {"perspective": p["name"]} for p in ordered for f in p["findings"]]
+    top = [t for t in hr.get("top3") or [] if t.get("fix") or t.get("my_quote")][:3]
+    for t in top:  # 모델이 고른 항목을 관점 지적과 이어 붙여 인용 확인·버리기 열쇠를 같이 쓴다
+        same = next((f for f in all_findings if f.get("my_quote") and f["my_quote"] == t.get("my_quote")), None)
+        t["key"] = same["key"] if same else finding_key(t)
+        t["my_ok"] = same["my_ok"] if same else _quoted(t.get("my_quote", ""), mine)
+        if not t.get("problem"):
+            t["problem"] = (same or {}).get("problem", "")
+    for f in all_findings:
+        if len(top) >= 3:
+            break
+        if f["key"] not in {t["key"] for t in top}:
+            top.append({"perspective": f["perspective"], "my_quote": f.get("my_quote", ""), "fix": f.get("fix", ""),
+                        "problem": f.get("problem", ""), "why_first": "", "key": f["key"], "my_ok": f["my_ok"]})
+    hr["top3"] = top
+
+    seen = {(v.get("sentence") or "") for v in hr.get("violations") or []}
+    for f in all_findings:
+        if f.get("my_quote") and f["my_quote"] not in seen:
+            hr.setdefault("violations", []).append({"rule": f["perspective"], "question": f.get("question", ""),
+                                                    "sentence": f["my_quote"], "why": f.get("problem", ""),
+                                                    "fix_hint": f.get("fix", ""), "key": f["key"]})
+            seen.add(f["my_quote"])
+    for t in top:  # 먼저 고칠 3가지를 버리면 같은 문장의 기존 위반도 같이 빠지게 열쇠를 붙인다
+        for v in hr.get("violations") or []:
+            if t.get("my_quote") and v.get("sentence") == t["my_quote"]:
+                v.setdefault("key", t["key"])
+    state["hr"] = hr
+    return state
+
+
+def set_discarded(rid: str, keys: list[str]) -> None:
+    """첨삭 화면에서 '내 경험과 달라 버리기'로 고른 지적을 저장한다."""
+    state = load_state(rid)
+    state["hr_discarded"] = sorted(set(keys))
+    save_state(rid, state)
+
+
 def rescore(rid: str, config: dict | None = None) -> dict:
     """인사담당자 첨삭 화면의 '다시 채점' (호출 1번). 직접 고친 뒤 점수가 어떻게 바뀌는지 본다."""
     state = load_state(rid)
@@ -183,8 +279,11 @@ def rescore(rid: str, config: dict | None = None) -> dict:
     state.setdefault("hr_history", []).append({k: state.get("hr", {}).get(k) for k in ("total", "verdict")}
                                               | {"at": datetime.now().isoformat(timespec="seconds")})
     state["hr"] = ask_json("judge", build_system_prompt("judge", state["analysis"]["subrole"]),
-                           _payload(state, cards_text, current_answers(state)), config=config, step="hr_rescore")
+                           _payload(state, cards_text, current_answers(state), _posting_block(state)),
+                           config=config, step="hr_rescore")
+    finish_hr(state)
     state.pop("hr_applied", None)
+    state.pop("hr_discarded", None)  # 새 결과에는 새로 고른다
     _save_and_archive(rid, state)
     return state
 
@@ -193,11 +292,15 @@ def apply_hr_feedback(rid: str, config: dict | None = None) -> dict:
     """인사담당자 첨삭 화면의 '지적대로 고치기' (호출 1번). 지적 사항만 고치고 새 사실은 만들지 않는다."""
     state = load_state(rid)
     hr = state.get("hr") or {}
-    found = hr.get("violations", []) + [{"rule": "HR", "why": r} for r in hr.get("reasons", [])]
+    discarded = set(state.get("hr_discarded") or [])  # 화면에서 '내 경험과 달라 버리기'를 고른 지적
+    found = [v for v in hr.get("violations", []) if v.get("key") not in discarded]
+    found += [{"rule": "HR", "why": r} for r in hr.get("reasons", [])]
     if not found:
         return state
     cards_text = cards_as_context(load_profile())
-    extra = f"## 고칠 것 (인사담당자 지적, 이것만 고친다)\n{json.dumps(found, ensure_ascii=False)}"
+    extra = (f"## 고칠 것 (인사담당자 지적, 이것만 고친다)\n{json.dumps(found, ensure_ascii=False)}\n\n"
+             "## 첨삭 반영 규칙\n- 경험 카드에 없는 성과·수치·기간은 지어내지 말고 그 자리에 [확인 필요]를 그대로 남긴다. "
+             "지원자가 나중에 직접 채운다.\n- 지원자가 버린 지적은 목록에 없다. 목록에 없는 문장은 고치지 않는다.")
     state["final"] = ask_json("writer", build_system_prompt("reviser", state["analysis"]["subrole"]),
                               _payload(state, cards_text, current_answers(state), extra),
                               config=config, temperature=0.4, step="hr_apply")
@@ -334,8 +437,9 @@ def step_resume(state: dict, ctx: Ctx) -> dict:
 
 def step_hr(state: dict, ctx: Ctx) -> dict:
     state["hr"] = ask_json("judge", build_system_prompt("judge", _subrole(state)),
-                           _payload(state, ctx.cards_text, current_answers(state)), config=ctx.config, step="hr")
-    return state
+                           _payload(state, ctx.cards_text, current_answers(state), _posting_block(state)),
+                           config=ctx.config, step="hr")
+    return finish_hr(state)
 
 
 def step_revise_2(state: dict, ctx: Ctx) -> dict:

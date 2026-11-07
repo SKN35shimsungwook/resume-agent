@@ -84,7 +84,13 @@ OUTPUT = {
     "resume": '{"summary": "", "sections": [{"title": "", "items": [{"text": "", "card_ids": []}]}]}',
     "judge": '{"scores": [{"item": "", "max": 0, "score": 0, "evidence": ""}], "total": 0, '
              '"verdict": "합격|보류|탈락", "reasons": [], "violations": [{"rule": "", "sentence": "", "why": ""}], '
-             '"interview_questions": []}',
+             '"interview_questions": [], '
+             '"posting_match": [{"requirement": "공고 문장 그대로", "kind": "자격요건|우대사항", "status": "반영|약함|빠짐", '
+             '"my_quote": "내 서류 문장 그대로 또는 빈 문자열", "note": ""}], '
+             '"perspectives": [{"name": "채용담당자|현업 팀장|직무 전문가|성과 검토자|문장 편집자|공고 매칭 검토자|면접관", '
+             '"result": "고칠 것 없음|고칠 것 있음", "findings": [{"question": "", "my_quote": "내 서류 문장 그대로", '
+             '"posting_quote": "공고 문장 그대로 또는 빈 문자열", "problem": "", "fix": "고칠 방향(없는 수치는 [확인 필요])"}]}], '
+             '"top3": [{"perspective": "", "my_quote": "", "fix": "", "why_first": ""}]}',
     "drafter": '{"assignments": [{"question": "", "card_ids": [], "why": ""}], '
                '"answers": [{"question": "", "text": "", "sentences": [{"text": "", "card_ids": []}]}], '
                '"missing_questions": [{"card_id": "", "question": ""}]}',
@@ -105,6 +111,29 @@ OUTPUT = {
     "reviser": '{"answers": [{"question": "", "text": "", "sentences": [{"text": "", "card_ids": []}]}], '
                '"changes": [{"rule": "", "before": "", "after": "", "why": ""}]}',
 }
+
+# 인사담당자 첨삭: 한 번 호출 안에서 7가지 관점으로 나눠 본다 (호출 수는 늘리지 않는다)
+HR_PERSPECTIVES = [
+    ("채용담당자", "지원 직무와 경력이 한눈에 연결되는가"),
+    ("현업 팀장", "입사 후 맡길 일을 실제로 해 본 경력인가"),
+    ("직무 전문가", "직무에 필요한 역량이 구체적인 행동으로 드러나는가"),
+    ("성과 검토자", "성과 주장에 수치나 결과 같은 근거가 있는가"),
+    ("문장 편집자", "글이 추상적이거나 같은 표현을 되풀이하지 않는가"),
+    ("공고 매칭 검토자", "공고의 자격 요건·우대 사항 중 서류에 빠진 것이 있는가"),
+    ("면접관", "면접에서 추가 질문을 받을 만큼 약하거나 모호한 부분이 있는가"),
+]
+
+HR_REVIEW = "## 7가지 관점 첨삭\n" + "\n".join(f"- **{n}**: {q}" for n, q in HR_PERSPECTIVES) + """
+perspectives에는 위 7개 관점을 이 순서대로 모두 넣는다.
+- 지적할 때마다 my_quote에 지원자 서류(답변·맞춤 이력서) 문장을, posting_quote에 관련된 공고 원문 문장을 **한 글자도 바꾸지 말고 그대로 복사**한다. 줄이거나 '…'로 자르지 않는다. 관련 공고 문장이 없으면 빈 문자열로 둔다.
+- 그 관점에서 고칠 것이 없으면 result를 "고칠 것 없음"으로 하고 findings는 빈 배열로 둔다. **억지로 지적을 만들지 않는다.** 잘 쓴 서류라면 여러 관점이 "고칠 것 없음"인 것이 정상이다.
+- 한 관점의 지적은 많아야 3개다. 다른 관점과 같은 문장·같은 문제를 겹쳐 지적하지 않는다.
+- fix에는 고칠 방향을 쓴다. 경험 카드에 없는 성과·수치·기간·직함은 **지어내지 않고 [확인 필요]로 비워 둔다**. 예: "점검표를 공유해 회의 시간을 [확인 필요]분 줄였다처럼 결과를 붙인다".
+- 경험 카드에 없는 경험·활동을 "추가하라"고 하지 않는다. 카드에 있는데 서류에 안 쓴 사실이면 그 카드 사실을 쓰라고 하고, 카드에도 없으면 "[확인 필요] 이런 경험이 있었다면 넣는다"처럼 지원자에게 확인을 맡긴다.
+- 경력 기간·연차·숫자가 서류 안이나 경험 카드와 서로 다르면 그대로 짚는다. 팀 성과는 본인이 맡은 몫이 드러나는지 본다.
+- **나이·성별·사진·가족 관계·결혼 여부·출신 지역·외모는 평가하지 않는다.** 서류에 있어도 점수·지적·면접 질문에 쓰지 않는다.
+posting_match에는 공고 분석의 must(자격요건)와 nice(우대사항)를 하나씩 모두 넣는다. requirement는 분석 요약이 아니라 '공고 원문'에 적힌 문장 그대로, my_quote는 그 요건을 보여 주는 서류 문장 그대로다(없으면 빈 문자열, status는 "빠짐").
+top3에는 전체 지적 중 합격에 가장 크게 영향을 주는 3가지만 고른다(지적이 3개보다 적으면 있는 만큼). violations에는 지금처럼 문장 지적을 넣되, perspectives의 지적과 같은 문장이면 같은 why를 쓴다."""
 
 ANALYZER_OUTPUT = (
     '{"company": "", "position": "", "subrole": "아래 목록의 id 하나", "subrole_why": "", '
@@ -136,6 +165,8 @@ def build_system_prompt(agent: str, subrole: str) -> str:
         my_angle = angle(group)
         if my_angle:
             blocks.append(f"## 지원자 이야기 각도 (본인이 정한 방향, 사실 확인용 아님)\n{my_angle}")
+    if agent == "judge":
+        blocks.append(HR_REVIEW)
     blocks.append(f"## 출력 형식 (JSON)\n{OUTPUT[agent]}")
     return "\n\n".join(blocks)
 

@@ -15,7 +15,7 @@ import shutil
 from pathlib import Path
 
 from .paths import DEMO, ROOT
-from .pipeline import run_id
+from .pipeline import finish_hr, run_id
 
 EXAMPLES = ROOT / "examples" / "demo"
 
@@ -119,18 +119,8 @@ def _fse_done() -> dict:
                                 {"title": "프로젝트", "items": [_s("공정 불량 대시보드 (2026.08) — Python·Streamlit, 동기 5명 시연 후 2회 수정", "ex_dash")]},
                                 {"title": "학력·면허", "items": [_s("가나폴리텍 자동화과 전문학사 (2025.02)", "ex_school"),
                                                               _s("운전면허 1종보통", "ex_license")]}]},
-        "hr": {"scores": [{"item": "직무 연관 현장 경험", "max": 25, "score": 17, "evidence": "시운전 보조 3개월, 센서 점검"},
-                          {"item": "트러블슈팅 서술 구체성", "max": 20, "score": 9, "evidence": "직접 원인을 찾은 장면이 없다"},
-                          {"item": "기본 요건", "max": 15, "score": 14, "evidence": "전공·1종보통 충족"},
-                          {"item": "협업·고객 소통", "max": 15, "score": 11, "evidence": "고객센터 1년"},
-                          {"item": "자격증", "max": 5, "score": 2, "evidence": "없음"},
-                          {"item": "안전 의식", "max": 5, "score": 2, "evidence": "언급 없음"},
-                          {"item": "정확성", "max": 5, "score": 5, "evidence": "오류 없음"},
-                          {"item": "어학", "max": 10, "score": 3, "evidence": "공인 점수 없음"}],
-               "total": 63, "verdict": "보류",
-               "reasons": ["트러블슈팅 장면이 '점검했다'에서 끝나 원인 판단이 보이지 않는다.", "갈등 문항에 상대와의 합의 과정이 없다."],
-               "violations": [], "interview_questions": ["시운전 중 가장 오래 걸린 점검은 무엇이었고, 왜 오래 걸렸나요?",
-                                                        "고객사 엔지니어가 장비 탓을 할 때 어떻게 대응하겠습니까?"]},
+        # 인사담당자 7관점 첨삭: 이 답변으로 실제 평가 모델(gemini-3.1-flash-lite)을 한 번 돌린 결과 (2026-11-08)
+        "hr": json.loads((EXAMPLES / "hr_fse.json").read_text(encoding="utf-8")),
     }
 
 
@@ -237,6 +227,7 @@ def build(reset: bool = False) -> Path:
         d = DEMO / "runs" / state["id"]
         d.mkdir(parents=True, exist_ok=True)
         state["updated"] = state["created"]
+        finish_hr(state)  # 인용 확인·먼저 고칠 3가지는 코드가 채운다 (예전 형식이면 그대로)
         (d / "state.json").write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
     return DEMO
 
