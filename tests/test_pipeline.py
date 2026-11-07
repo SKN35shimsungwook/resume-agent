@@ -139,3 +139,25 @@ def test_length_limit_is_checked_by_code():
     analysis = {"questions": [{"question": "지원 동기를 작성해 주세요", "limit": 300}]}
     assert any("넘었다" in v["why"] for v in length_violations(analysis, answer("가" * 320, [])["answers"]))
     assert any("못 미친다" in v["why"] for v in length_violations(analysis, answer("가" * 100, [])["answers"]))
+
+
+def test_self_view_sentence_needs_no_card():
+    for s in ["기술의 가치를 고객의 언어로 전달하는 것이 저의 직업관입니다.",
+              "저의 차별화된 역량은 평가 기준을 설계하고 문제를 진단하는 기획력입니다.",
+              "저의 가장 큰 장점은 현장에서 끝까지 임무를 완수하는 끈기입니다."]:
+        assert not sentence_violations(answer(s, [{"text": s, "card_ids": []}])["answers"], CARDS, POSTING), s
+
+
+def test_made_up_habit_is_still_blocked():
+    s = "이를 보완하기 위해 현재는 이상 징후가 감지되면 즉시 선임에게 공유하는 습관을 들이고 있습니다."
+    found = sentence_violations(answer(s, [{"text": s, "card_ids": []}])["answers"], CARDS, POSTING)
+    assert any(v["rule"] == "FA-3" for v in found)
+
+
+def test_lack_of_experience_as_weakness_is_flagged():
+    s = "보완해야 할 약점은 수주 실적을 낸 정규 경력이 아직 부족하다는 점입니다."
+    found = sentence_violations(answer(s, [{"text": s, "card_ids": []}])["answers"], CARDS, POSTING)
+    assert any(v["rule"] == "WR-6" for v in found)
+    ok = "제 단점은 혼자 해결하려다 공유가 늦어지는 점입니다."
+    assert not [v for v in sentence_violations(answer(ok, [{"text": ok, "card_ids": []}])["answers"], CARDS, POSTING)
+                if v["rule"] == "WR-6"]

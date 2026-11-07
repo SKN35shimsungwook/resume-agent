@@ -299,6 +299,13 @@ def merge_info(info: dict, posting_text: str) -> dict:
 
 # ── 2단계: 문장 단위 근거 검사 (LLM 판정 없이 코드로) ─────────────────────────
 PLEDGE = re.compile(r"(겠습니다|싶습니다|하겠|되겠|이루고|기여하|목표입니다|계획입니다)")
+# 직업관·장단점·핵심 역량처럼 '나는 이런 사람'이라는 자기 서술(주제문)은 사실 주장이 아니라 근거 카드 없이 둔다.
+# 녹화본 재생에서 FA-3이 잡은 10문장 중 7문장이 이런 주제문이었다. 행동을 지어낸 문장은 이 표현이 없어 계속 잡힌다.
+SELF_VIEW = re.compile(r"(직업관|가치관|좌우명|신념)|저의\s*(가장\s*큰\s*)?(장점|단점|강점|약점|(차별화된\s*)?(핵심\s*)?역량)은"
+                       r"|(장점|단점|강점|약점)(은|이라면|으로는)\s|점이\s*(장점|단점|강점|약점)입니다")
+# 약점 문항에서 경력·자격 부족을 약점으로 고르면 안 된다 (BASE_RULES). 그 경우는 따로 잡는다.
+WEAK_CHOICE = re.compile(r"(약점|단점|보완해야\s*할|부족한\s*점)")
+LACK = re.compile(r"(경력|자격증|자격|실적|학력|학위|어학\s*점수)[^.。]{0,25}(부족|없|미흡|모자)")
 
 
 def _card_texts(cards: list, posting_text: str) -> dict[str, str]:
@@ -311,7 +318,8 @@ def _card_texts(cards: list, posting_text: str) -> dict[str, str]:
 def sentence_violations(answers: list, cards: list, posting_text: str) -> list[dict]:
     """문장마다 단 근거 카드(card_ids)를 기준으로 본다.
 
-    - FA-3: 다짐·포부가 아닌데 근거 카드가 없는 문장
+    - FA-3: 다짐·포부·자기 서술(직업관·장단점·핵심 역량)이 아닌데 근거 카드가 없는 문장
+    - WR-6: 경력·자격·실적 부족을 약점으로 고른 문장
     - FA-2: 문장 속 숫자가 그 문장이 근거로 단 카드(또는 공고)에 없음 — 카드 전체가 아니라 '인용한 카드' 기준
     - FA-4: 본문(text)과 문장별 근거 목록(sentences)이 어긋남 — 근거 표시를 믿을 수 없다
     """
@@ -327,7 +335,11 @@ def sentence_violations(answers: list, cards: list, posting_text: str) -> list[d
                           "fix_hint": "답변의 모든 문장을 sentences에 넣고 각 문장에 근거 카드 id를 단다."})
         for s in sents:
             text, ids = s.get("text", ""), [i for i in (s.get("card_ids") or []) if i in texts]
-            if not ids and not PLEDGE.search(text) and len(text) >= 15:
+            if WEAK_CHOICE.search(text) and LACK.search(text):
+                found.append({"rule": "WR-6", "question": q, "sentence": text,
+                              "why": "경력·자격·실적 부족을 약점으로 골랐다 (약점 문항 규칙 위반).",
+                              "fix_hint": "고칠 수 있는 성향·습관 수준의 약점 하나와, 고치려고 한 행동(카드 사실)으로 바꾼다."})
+            if not ids and not PLEDGE.search(text) and not SELF_VIEW.search(text) and len(text) >= 15:
                 found.append({"rule": "FA-3", "question": q, "sentence": text,
                               "why": "근거 카드가 없는 사실 문장이다.",
                               "fix_hint": "카드에 있는 사실로 바꾸고 근거 카드 id를 달거나, 다짐 문장이면 다짐으로 쓴다."})
