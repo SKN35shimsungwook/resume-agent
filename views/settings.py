@@ -31,6 +31,16 @@ with st.container(border=True, key="card_model"):
     if "openai" in (config["writer"]["provider"], config["judge"]["provider"]):
         st.info("OpenAI는 유료 크레딧을 써요. 무료 등급(Gemini·Gemma)만 쓰려면 둘 다 gemini로 두세요.")
 
+with st.container(border=True, key="card_privacy"):
+    st.markdown("**개인정보 가리기**")
+    st.caption("Gemini 무료 등급은 보낸 내용이 서비스 개선에 쓰이고 사람이 볼 수도 있어요. "
+               "켜 두면 이름·이메일·전화번호·주민번호를 [이름]·[이메일]처럼 바꿔 보내고, 받은 답에서 다시 원래대로 돌려놓아요. "
+               "경력 내용은 그대로 가요.")
+    config["mask_personal"] = st.toggle("보내기 전에 개인정보 가리기", config.get("mask_personal", True))
+    words = st.text_area("더 가릴 단어 (한 줄에 하나: 집 주소, 출신 학교, 가족 이름 등)",
+                         "\n".join(config.get("mask_words", [])), height=90)
+    config["mask_words"] = [w.strip() for w in words.splitlines() if w.strip()]
+
 with st.container(border=True, key="card_verify"):
     st.markdown("**검증 방식**")
     config["confirm_each_round"] = st.toggle(

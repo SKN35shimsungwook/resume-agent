@@ -193,3 +193,32 @@ def test_finish_hr_7관점_인용확인과_먼저고칠3가지():
     assert hr["posting_match"][0]["my_ok"] is False
     pipeline.finish_hr(state)  # 두 번 돌려도 같은 결과
     assert len(state["hr"]["posting_match"]) == 3 and len(state["hr"]["violations"]) == 2
+
+
+def test_personal_info_is_masked_before_sending_and_restored_after(ws, monkeypatch):
+    from core import llm
+    save_profile(Profile(name="홍길동", email="hong@example.com", phone="010-1234-5678", cards=list(CARDS)))
+    sent = {}
+
+    def fake_call(config, role, spec, system, prompt, temperature, step):
+        sent["text"] = system + prompt
+        return json.dumps({"text": "[이름]입니다. 연락처 [전화], 다른 번호 [전화2]"}, ensure_ascii=False)
+
+    monkeypatch.setattr(llm, "_call_with_retry", fake_call)
+    monkeypatch.setattr(llm, "_check_budget", lambda *a: None)
+    config = llm.load_config() | {"mask_words": ["서울시 강남구 테헤란로 1"]}
+    out = llm.ask_json("writer", "시스템", "저는 홍길동, hong@example.com, 010-1234-5678, 02-555-1234, "
+                       "주소 서울시 강남구 테헤란로 1, 주민번호 900101-1234567", config=config)
+    for secret in ("홍길동", "hong@example.com", "010-1234-5678", "02-555-1234", "테헤란로", "900101-1234567"):
+        assert secret not in sent["text"], secret
+    assert out["text"] == "홍길동입니다. 연락처 010-1234-5678, 다른 번호 02-555-1234"
+
+
+def test_masking_can_be_turned_off(ws, monkeypatch):
+    from core import llm
+    save_profile(Profile(name="홍길동", cards=list(CARDS)))
+    sent = {}
+    monkeypatch.setattr(llm, "_call_with_retry", lambda c, r, s, sy, p, t, st: sent.setdefault("t", p) and "{}")
+    monkeypatch.setattr(llm, "_check_budget", lambda *a: None)
+    llm.ask_json("writer", "s", "홍길동", config=llm.load_config() | {"mask_personal": False})
+    assert sent["t"] == "홍길동"

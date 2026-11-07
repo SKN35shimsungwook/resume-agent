@@ -15,6 +15,8 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+from .privacy import build_rules, mask, unmask
+
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 CONFIG_PATH = DATA_DIR / "config.json"
 USAGE_PATH = DATA_DIR / "usage.jsonl"
@@ -42,6 +44,9 @@ DEFAULT_CONFIG = {
     "gemini_api_key": "",
     "openai_api_key": "",
     "confirm_each_round": False,
+    # 보내기 전에 이름·이메일·전화·주민번호와 mask_words(주소·학교 등)를 가리고, 답에서 되돌린다.
+    "mask_personal": True,
+    "mask_words": [],
 }
 
 RETRYABLE_CODES = {408, 429, 500, 502, 503, 504}
@@ -139,6 +144,23 @@ def ask_json(
     config = config or load_config()
     if temperature is None:
         temperature = 0.6 if role == "writer" else 0.2
+    found: dict = {}
+    if config.get("mask_personal", True):  # 무료 등급 약관 때문에 개인정보는 가려서 보낸다 (core/privacy.py)
+        system, prompt = _mask_pair(system, prompt, config, found)
+    return unmask(_ask_json_raw(role, system, prompt, config, temperature, step), found)
+
+
+def _mask_pair(system: str, prompt: str, config: dict, found: dict) -> tuple[str, str]:
+    try:
+        from .profile import load_profile
+        profile = load_profile()
+    except Exception:  # 프로필이 없거나 깨져도 정규식(메일·전화·주민번호) 가림은 한다
+        profile = None
+    rules = build_rules(profile, config.get("mask_words") or [])
+    return mask(system, rules, found), mask(prompt, rules, found)
+
+
+def _ask_json_raw(role: str, system: str, prompt: str, config: dict, temperature: float, step: str) -> dict:
     specs = [config[role]]
     fallback = (config.get("fallback") or {}).get(role) or []
     for fb in (fallback if isinstance(fallback, list) else [fallback]):  # 예비는 하나 또는 여러 개(순서대로)
